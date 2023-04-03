@@ -1,0 +1,1477 @@
+---
+title: 'Clinical QC'
+author: 
+- name: "Alejandro M.Carrasco"
+  affiliation: UCL
+output: 
+  html_document:
+    code_folding: hide
+    theme: paper
+    highlight: kate
+    df_print: paged
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+library(plyr)
+library(tidyverse)      # For tidy manipulation of data
+library(here)           # For file path construction
+library(DT)             # To display data tables
+library(readxl)         # To read excel files
+library(stringr)        # To do string operations
+library(survival)
+library(survminer)
+library(rms)
+library(lubridate)
+```
+
+
+
+# description
+
+In this section we are going to do the data QC across all cohorts we had available for the analysis.
+We are going to remove samples that never took levodopa, patients that do not have longitudinal data available, left censored patients ( patients with LiD at beaseline), and patients that we could not match genetic data for.  
+In addition, we will detect patients with high disease duration at baseline (higher than 10 years). We will detect these and remove them when running the genetic association analysis
+
+- OPDC prospective, longitudinal study that recruited patients with early idiopathic Parkinson's disease, healthy controls and participants at risk of PD as well as participants with REM Sleep Behaviour Disorser. 
+The inclusion criteria was: idiopathic PD patients that were diagnosed within last 3 years according to the UK PD Brain Bank criteria. No evidence of significant cognitive impairment.
+This makes OPDC such a suitable data to better understand the progression of PD
+Of note, the May-2021 release of the clinical data only includes includes idiopathic PD patients.
+
+# Load the data
+
+```{r}
+#OPDC data
+opdc_withdrawal_data <- as_tibble(read.csv("~/Data/WorkingDirectory/OPDC/clinical_data/Discovery_withdrawal_data_with_onset_2021_04.csv"))
+opdc_all_data <- as_tibble(read.csv("~/Data/WorkingDirectory/OPDC/clinical_data/Discovery_FU_data_with_onset_2021_04.csv"))
+opdc_ldopa_data <- as_tibble(read.csv("~/Data/WorkingDirectory/OPDC/clinical_data/Discovery_LEDD_data_visit_1_to_3_2021_04.csv"))
+opdc_fam <- as_tibble(read.table("~/Data/WorkingDirectory/OPDC/genetic_data/OXFORD.fam", quote="\"", comment.char=""))
+
+
+#PROBAND data
+tpd_all_visits = as_tibble(read_csv("~/Data/WorkingDirectory/PROBAND/clinical_data/P3_TPD_Version2_temp_06_16_2020.csv"))
+P3_full = as_tibble(read_csv("~/Data/WorkingDirectory/PROBAND/clinical_data/P3_full_extract_with_relations.csv"))
+tpd_Ldopa_data <- as_tibble(read.csv("~/Data/WorkingDirectory/PROBAND/clinical_data/Tracking_Ldopa_data_2021_03.csv"))
+tpd_LdopaDoses_data <- as_tibble(read.csv("~/Data/WorkingDirectory/PROBAND/clinical_data/Tracking_Ldopa_data_with_doses_2021_03.csv"))
+tpd_codebreak <- readxl::read_excel("~/Data/WorkingDirectory/PROBAND/clinical_data/Proband.Geno.Pheno_original.xlsx")
+
+
+# PDSTAT data
+pdstat_updrs4_data <- readxl::read_xlsx("~/Data/WorkingDirectory/PDSTAT/clinical_data/FUP_Export_CRF_MDSUPDRS_PartIV.xlsx")
+pdstat_demographics  <- readxl::read_xlsx("~/Data/WorkingDirectory/PDSTAT/clinical_data/Export_check.xlsx")
+pdstat_fam <- fam_file <- read.table("~/Data/WorkingDirectory/PDSTAT/genetic_data/PDSTAT.fam", quote="\"", comment.char="")
+pdstat_updrs3_data <- readxl::read_xlsx("~/Data/WorkingDirectory/PDSTAT/clinical_data/FUP_Export_CRF_MDSUPDRS_PartIII_Off.xlsx")
+pdstat_codebreaker <- read.delim("~/Data/WorkingDirectory/PDSTAT/clinical_data/PDSTAT_NEUROCHIP_IDs.txt")
+
+
+# PPMI data
+#---Loading UPDRS4, medication data, and list of all PD patients---####
+ppmi_all_visits <- as_tibble(read.csv("~/Data/WorkingDirectory/PPMI/clinical_data/MDS_UPDRS_Part_IV.csv"))
+ppmi_PD_medication <- as_tibble(read.csv("~/Data/WorkingDirectory/PPMI/clinical_data/Use_of_PD_Medication.csv"))
+ppmi_PD_IDs <- read.delim("~/Data/WorkingDirectory/PPMI/clinical_data/PD_IDs.txt", header=FALSE) # Some PD patients that did not have WES data were exluded
+
+PPMI_UPDRSIII<- as_tibble(read.csv("~/Data/WorkingDirectory/PPMI/clinical_data/MDS_UPDRS_Part_III.csv"))
+PPMI_UPDRSII <- read.csv("~/Data/WorkingDirectory/PPMI/clinical_data/MDS_UPDRS_Part_II__Patient_Questionnaire.csv")
+PPMI_PD_IDs <- read.delim("~/Data/WorkingDirectory/PPMI/clinical_data/PD_IDs.txt", header=FALSE) 
+
+
+ppmi_PD_Features <- read.csv("~/Data/WorkingDirectory/PPMI/clinical_data/PD_Features.csv")
+ppmi_Screening_Demographics <- read.csv("~/Data/WorkingDirectory/PPMI/clinical_data/Screening___Demographics.csv")
+ppmi_Original_Cohort <- read.csv("~/Data/WorkingDirectory/PPMI/clinical_data/PPMI_Original_Cohort_BL_to_Year_5_Dataset_Apr2020.csv")
+ppmi_Adverse_Event_Log <- read.csv("~/Data/WorkingDirectory/PPMI/clinical_data/Adverse_Event_Log.csv")
+ppmi_Conclusion_Participation <- read.csv("~/Data/WorkingDirectory/PPMI/clinical_data/Conclusion_of_Study_Participation.csv")
+```
+
+
+# Data QC
+
+
+## Data QC - OPDC
+
+In this first chunk of code we apply all the QC criteria
+
+```{r}
+
+##### NEVER TOOK LEVODOPA #####
+# First, we exclude patients that have not taken Ldopa at least once in the available visits
+PD_Ldopa_patients <- opdc_all_data %>% filter(af_3_c_levodopa == 1) %>%
+  select(subjid) %>% unique() %>% pull()
+opdc_all_data <- opdc_all_data %>% filter(subjid %in% PD_Ldopa_patients)
+
+
+##### DISEASE DURATION ####
+# Check patients with very high disease duration at baseline and observe data distribution
+BL_data = opdc_all_data %>% filter(visit == 1)
+
+# No patients missing disease_duration info needed to derive dyskinesias outcome
+BL_data %>%
+  select(subjid, disease_duration, disease_duration_onset, age_diag, age_onset, age) %>%
+  summary()
+
+# Check the disease duration distribution
+ggplot(BL_data, mapping = aes(disease_duration_onset)) +
+  geom_histogram(color = "black", fill = "white", bins = 30) +
+  theme_bw()
+
+
+# Observe disease duration distribution
+check_disdur = BL_data %>%
+  filter(disease_duration_onset > 10.05) %>%
+  select(subjid, visit, disease_duration_onset, ag_4_1_time_dysk)
+
+
+# Remove patients with long disease duration
+opdc_all_data <- opdc_all_data %>%
+  filter(!subjid %in% check_disdur$subjid)
+
+
+##### MISSING LONGITUDINAL DATA ######
+# Check patients that only have baseline data
+subjid_OneRegistry = opdc_all_data %>% group_by(subjid) %>% 
+  dplyr::summarise(n = n()) %>% filter(n == 1) %>% pull(subjid)
+
+opdc_all_data %>% 
+  select(subjid, visit, disease_duration_onset, ag_4_1_time_dysk) %>%
+  filter(subjid %in% subjid_OneRegistry) %>% View
+
+# Remove patients with only data at baseline
+opdc_all_data = opdc_all_data %>% filter(!subjid %in% subjid_OneRegistry)
+
+
+##### REMOVE LEFT CENSORING ####
+# Check left_censored data (Patients meeting the outcome at BL)
+# No patients missing disease_duration info needed to derive dyskinesias outcome
+BL_data = opdc_all_data %>% filter(visit == 1)
+BL_data %>%
+  select(subjid, ag_4_1_time_dysk) %>%
+  group_by(ag_4_1_time_dysk) %>% count()
+
+
+left_censored_ids = BL_data %>%
+  filter(ag_4_1_time_dysk >= 2)  %>% pull(subjid)
+
+opdc_all_data = opdc_all_data %>% filter(!subjid %in% left_censored_ids)
+
+
+
+# Check left_censored data (Patients meeting the outcome at BL)
+# No patients missing disease_duration info needed to derive dyskinesias outcome
+BL_data = opdc_all_data %>% filter(visit == 1)
+BL_data %>%
+  select(subjid, ag_4_1_time_dysk) %>%
+  group_by(ag_4_1_time_dysk) %>% count()
+
+
+
+#### Get patients with genotyping data available #####
+# Remove patients that we cannot match clinical data
+PD_Ldopa = opdc_all_data %>%
+  mutate(ID = str_replace_all(subjid, c("PDS" = "", "/" = "")),
+         SEX = ifelse(gender == "male","1", "2")) %>%
+  inner_join(opdc_fam %>% dplyr::select(V1,V2), by = c("ID" = "V2")) %>%
+  dplyr::rename(FID = V1, IID = ID) %>%
+  dplyr::relocate(c(FID,IID), .after = subjid) %>%
+  dplyr::relocate(SEX, .after = visit)
+
+
+opdc_ldopa_data = opdc_ldopa_data %>%
+  mutate(IID = str_replace_all(subjid, c("PDS" = "", "/" = "")))
+
+
+# We now get the Levodopa dose variable that we will use in our model.
+# Note that becuase we do not have Levodop dose at all time points, we cannot
+# get the Levodopa dose at the time point people met the outcome
+opdc_ldopa_data_BL = opdc_ldopa_data %>% filter(visit == 1) 
+PD_Ldopa = PD_Ldopa %>%
+  left_join(opdc_ldopa_data_BL %>% select(-visit) ) %>%
+  dplyr::rename(LEDD_total_BL = LEDD_total)
+
+# Save the disease duration at BL that we will use in cox models
+PD_Ldopa = PD_Ldopa %>% left_join(BL_data %>% select(subjid, disease_duration_onset_BL = disease_duration_onset))
+```
+
+
+For the remaining samples, we calculate the time from onset to last visit or the time from onset to LiD development
+We get the time to outcome as the midpoint between visits depending on whether the outcome was LID or we are deriving the last visit
+
+```{r}
+# TIME TO LAST VISIT
+
+# We have the withdrawal time from onset and also we can calculate the time to dyskinesia
+# However, when people do not develop LID and the withdrawal date is not available,
+# we will use the last visit with no NA as the withdrawal date.
+
+visittimes <- PD_Ldopa %>%
+  dplyr::select(subjid, IID, visit, disease_duration_onset) %>%
+  dplyr::rename(time_lastVisit = disease_duration_onset)
+
+# We get the time to the last visit available for each patients
+# Furthermore we will get the visit
+lastVisitTime <- visittimes %>% 
+  group_by(subjid) %>%
+  #filter(!is.na(time_lastVisit)) %>%
+  arrange(subjid, time_lastVisit) %>%
+  slice(n()) %>%
+  mutate(visit_number_withdrawal = visit) %>%
+  select(-visit)
+
+# We left join with the main data frame
+PD_Ldopa <- PD_Ldopa %>% 
+  left_join(lastVisitTime) 
+
+# Getting the earliest time point people develop LID for UPDRS 4.1 >=2
+dyskinesia_2 <- PD_Ldopa %>%
+  group_by(subjid) %>%
+  filter((!is.na(ag_4_1_time_dysk)) & (ag_4_1_time_dysk >=2)) %>%
+  arrange(visit) %>%
+  slice(1L) %>%
+  mutate(visit_number_dyskinesia = visit) %>%
+  ungroup()
+
+
+# Then, we get the time from onset to dyskinesia, and we create the event_dyskinesia var
+dyskinesia_2 <- dyskinesia_2 %>%
+  dplyr::select(subjid, visit_number_dyskinesia, disease_duration_onset) %>%
+  mutate(timeToEvent = disease_duration_onset - 0.75,
+  #mutate(timeToEvent = disease_duration_onset,
+           event_dyskinesia = 1) %>%
+  select(-disease_duration_onset)
+
+
+# TIME TO EVENT CALCULATION (WITHDRAWAL OR DYSKINESIAS)
+PD_Ldopa = PD_Ldopa %>%
+  left_join(dyskinesia_2, by ="subjid") %>% 
+  mutate(event_dyskinesia = replace_na(event_dyskinesia, 0)) %>%
+  group_by(subjid)
+
+
+PD_Ldopa <- PD_Ldopa %>%
+  mutate(time_Event = ifelse(event_dyskinesia == 1, timeToEvent,
+                             ifelse(event_dyskinesia == 0, time_lastVisit, NA)),
+         visit_number_merged = ifelse(event_dyskinesia == 0, visit_number_withdrawal, visit_number_dyskinesia))
+
+# Checking no unexpected NAs are being generated
+PD_Ldopa  %>%
+  filter(is.na(time_Event) |  is.na(visit_number_merged))
+
+```
+
+
+We will also impute the MDS-UPDRS III data we will use in model comparison
+
+```{r}
+# UPDRS III imputation
+
+# Check UPDRSIII nas at BL
+sum(is.na(BL_data$UPDRS_III)) 
+source(here::here("R", "clinicalData_wrangling.R"))
+#source("../R/clinicalData_wrangling.R")
+motor_data_BL = impute_UPDRSIII(BL_data, ID = "subjid", format = "long") 
+
+# We do this to retrieve the NA entried not returned by the function for imputating MDS-UPDRSIII
+motor_data_BL = motor_data_BL %>% 
+  right_join(BL_data %>% select(subjid)) %>%
+  arrange(subjid)
+BL_data = BL_data %>% arrange(subjid)
+
+cor(motor_data_BL$UPDRSIII_totalIMputed, BL_data$UPDRS_III,  method = "pearson", use = "complete.obs")
+sum(is.na(motor_data_BL$UPDRSIII_totalIMputed))
+# We have imputed data from 7 patients
+PD_Ldopa = PD_Ldopa %>%
+  left_join(motor_data_BL %>% select(-visit)) %>%
+  dplyr::rename(UPDRSIII_imputed_BL = UPDRSIII_totalIMputed)
+
+```
+
+
+Finally, we extract the data we will need for model comparison and subsequent analysis and save it
+
+```{r}
+# GET DATA OF INTEREST
+PD_final = PD_Ldopa %>%
+  group_by(subjid) %>% slice(1L) %>% ungroup() %>%
+  select(subjid, FID, IID, event_dyskinesia, time_Event,
+         SEX, age_onset, disease_duration_onset_BL, LEDD_BL = LEDD_total_BL, UPDRSIII_imputed_BL) %>%
+  mutate(FID_IID = paste(FID, IID, sep = "_"),
+         age_onset.std = scale(age_onset),
+         disease_duration_onset_BL.std = scale(disease_duration_onset_BL),
+         LEDD_BL.std = scale(LEDD_BL),
+         SEX = as.factor(SEX),
+         UPDRSIII.std = scale(UPDRSIII_imputed_BL))
+
+
+
+
+OPDC_plink.samples <- data.frame(FID = 0, IID = PD_final$FID_IID)
+OPDC_plink.sex <- data.frame(FID = PD_final$FID_IID, IID = PD_final$FID_IID, SEX = PD_final$SEX)
+write.table(OPDC_plink.samples, file = "../plink_QC/OPDC_plink.samples.txt", quote = FALSE, sep = " ", col.names = T, row.names = F)
+write.table(OPDC_plink.sex, file = "../plink_QC/OPDC_plink.sex.txt", quote = FALSE, sep = " ", col.names = T, row.names = F)
+
+
+```
+
+
+
+## Data QC - TPD
+
+In this first chunk of code we apply all the QC criteria previously mentioned. Moreover we will exclude patients that changed diagnosis over time
+
+
+```{r}
+# Merge the genetic data IDs with the clinical data ID using the codebreak
+all_visits <- tpd_all_visits %>% 
+  left_join(tpd_codebreak, by = c("ID" = "Kate.Patient.ID"))
+
+###### Get samples IDs with genetic data available  #######
+# Get data to use in downstream genetic QC 
+export_PDcases = all_visits %>%
+  select(IID,gender) %>%
+  filter(!is.na(IID))
+# Extract the PD cases list to filter genetic files
+export_PDcases_fam = export_PDcases %>%
+  left_join(fam, by = c("IID" = "V2")) %>%
+  select(V1, IID) %>%
+  filter(!is.na(V1)) %>%
+  rename(FID = V1)
+# Get the file that I will use to do some sex checks in plink
+export_PDcases_sex = export_PDcases %>%
+  left_join(fam, by = c("IID" = "V2")) %>%
+  select(V1, IID, gender) %>%
+  filter(!is.na(V1)) %>%
+  rename(FID = V1, SEX = gender)
+# Recode the variable sex to match the codification on the fam file
+export_PDcases_sex <- export_PDcases_sex %>% 
+  mutate(SEX=recode(SEX,
+                    `0`=1L, `1`=2L))
+
+write.table(export_PDcases_fam, file = "proband_PD_extract.txt", sep = "\t", quote = FALSE, row.names = FALSE )
+write.table(export_PDcases_fam, file = "proband_PD_sex.txt", sep = "\t", quote = FALSE, row.names = FALSE )
+
+
+
+
+
+##### EXCLUDE NON PD patients ####
+# Look at different diagnoses
+changeDiagnoses <- tpd_all_visits %>%
+  dplyr::group_by(change_diagnosis) %>%
+  dplyr::summarise(count = n())
+# We filter out those patients with a different diagnosis
+PD_only = tpd_all_visits %>%
+  filter(is.na(change_diagnosis))
+
+
+
+
+###### Exclude patients that never took levodopa #####
+Ldopa_data_filt <- tpd_Ldopa_data %>%
+  filter(!is.na(Ldopa_bin) | !is.na(Ldopa_previous)) %>%
+  group_by(ID) %>%
+  filter(Ldopa_bin == 1 | Ldopa_previous == 1) %>%
+  arrange(ID, Visit) %>%
+  slice(1L)
+
+# Count the number of people that miss the age they started the Ldopa treatment
+length(which(is.na(Ldopa_data_filt $age_Ldopa_start & is.na(Ldopa_data_filt $age_Ldopa_prev_start))))
+
+# Filter PD patients that took Ldopa at least at one time point
+PDcases_Ldopa <- PD_only %>%
+  filter(ID %in% Ldopa_data_filt[["ID"]])
+
+# Filtering the Ldopa dataset so we only have info for PD + Ldopa patients
+LdopaDoses_data <- tpd_LdopaDoses_data %>%
+  filter(ID %in% PDcases_Ldopa$ID)
+Ldopa_data_filt  <- Ldopa_data_filt %>%
+  filter(ID %in% PDcases_Ldopa$ID)
+
+
+
+
+##### Get disease duration and age at each visit #####
+PDcases_Ldopa <- PDcases_Ldopa %>%
+  mutate(time_V1_to_V4 = age_V4 - age_V1,
+         time_V1_to_V7 = age_V7 - age_V1,
+         time_V1_to_V9 = age_V9 - age_V1,
+         time_V1_to_V10 = age_V10 - age_V1,
+         time_V1_to_V11 = age_V11 - age_V1)
+
+PDcases_Ldopa <- PDcases_Ldopa %>% 
+  mutate(V1_disease_duration_onset = age_V1 - age_onset,
+         V4_disease_duration_onset = age_V4 - age_onset,
+         V7_disease_duration_onset = age_V7 - age_onset,
+         V10_disease_duration_onset = age_V10 - age_onset,
+         V11_disease_duration_onset = age_V11 - age_onset)
+
+
+# Impute the few ppl missing AAO based age data and time to onset
+print(paste("Number of people missing AAO: ",length(which(is.na(PDcases_Ldopa$age_onset)))))
+# Mean time value from onset to diagnosis
+PDcases_Ldopa %>%
+  summarise(mean_time_to_diagnosis = mean(time_onset_to_diag, na.rm = T))
+
+#Make new variable for age at diagnosis  
+PDcases_Ldopa <- PDcases_Ldopa %>% 
+  mutate(age_diag = age_V1 - disease_duration_diag_V1)
+
+#Create imputed age of onset variable using the mean time from onset to diagnosis from non-missing cases
+PDcases_Ldopa <- PDcases_Ldopa %>% 
+  mutate(age_onset_imput = ifelse(!is.na(age_onset), age_onset,
+                                  ifelse(is.na(age_onset), age_diag - mean(time_onset_to_diag, na.rm = TRUE), NA)),
+         disease_duration_onset_imput = ifelse(!is.na(V1_disease_duration_onset), V1_disease_duration_onset,
+                                               ifelse(is.na(V1_disease_duration_onset), age_V1 - age_onset_imput, NA)))
+
+PDcases_Ldopa <- PDcases_Ldopa %>% 
+  mutate(V4_disease_duration_onset_imput = age_V4 - age_onset_imput,
+         V7_disease_duration_onset_imput = age_V7 - age_onset_imput,
+         V9_disease_duration_onset_imput = age_V9 - age_onset_imput,
+         V10_disease_duration_onset_imput = age_V10 - age_onset_imput,
+         V11_disease_duration_onset_imput = age_V11 - age_onset_imput)
+
+#Summary stats for age at onset and age at entry at baseline
+PDcases_Ldopa %>% 
+  dplyr::summarise(AAO_mean = mean(age_onset_imput, na.rm = TRUE),
+                   AAO_sd = sd(age_onset_imput, na.rm = TRUE),
+                   agedx_mean = mean(age_diag, na.rm = TRUE),
+                   agedx_sd = sd(age_diag, na.rm = TRUE),
+                   age_mean = mean(age_V1, na.rm = TRUE),
+                   age_sd = sd(age_V1, na.rm = TRUE))
+
+
+
+
+
+##### Look at gender data and do some wrangling #####
+PDcases_Ldopa %>% 
+  group_by(gender) %>% 
+  summarise(count = n())
+
+#Code gender as string
+PDcases_Ldopa <- PDcases_Ldopa %>%
+  mutate(gender = ifelse(gender == 0, "male",
+                         ifelse(gender == 1, "female", NA)))
+
+#As factor and hange reference level
+PDcases_Ldopa$gender <- as.factor(PDcases_Ldopa$gender)
+PDcases_Ldopa$gender <- relevel(PDcases_Ldopa$gender, ref = "male")
+
+
+
+
+
+###### Explore disease duration distribution ######
+
+#Summary of disease duration at baseline
+PDcases_Ldopa %>% 
+  summarise(mean_dd = mean(disease_duration_onset_imput, na.rm = TRUE))
+
+#Plot histogram to see distribution
+ggplot(data = PDcases_Ldopa, mapping = aes(x  = disease_duration_onset_imput)) +
+  geom_histogram(color = "black", fill = "white") +
+  theme_bw()
+
+
+
+
+
+
+###### Look at withdrawal data ######
+PDcases_Ldopa %>% 
+  group_by(Withdrawn) %>%
+  summarise(count = n())
+#Summarise by categories of withdrawal reason
+withdrawals <- PDcases_Ldopa %>%
+  group_by(withd_res, withd_other) %>% 
+  summarise(count = n())
+#Look at the detail withdrawal reasons (freetext)
+PDcases_Ldopa %>% 
+  group_by(withd_other) %>% 
+  summarise(count = n())
+
+# Check that withdrawal data is within a sensigle range
+
+#Convert withdrawal date into an actual date
+PDcases_Ldopa <- PDcases_Ldopa %>% 
+  mutate(withdrawal_date = as.Date(withdrawal_date, format = "%d%b%Y"))
+
+#Correct dates out of range
+#Sensible range is anything from 2012 to today
+sensible_range <- interval(ymd("2012-01-01"), today())
+
+PDcases_Ldopa %>% 
+  filter(!withdrawal_date %within% sensible_range) %>% 
+  dplyr::select(ID, withdrawal_date)
+
+
+
+
+
+###### Calculate time to withdrawal ######
+#Convert dates to age format and calculate time in years from onset to study withdrawal
+PDcases_Ldopa <- PDcases_Ldopa %>%
+  mutate(age_withdrawal = age_V1 + time_baseline_to_withdrawal,
+         time_onset_to_withdrawal = age_withdrawal - age_onset_imput) 
+
+check <- PDcases_Ldopa %>% 
+  dplyr::select(age_V1, age_onset_imput, age_withdrawal, time_baseline_to_withdrawal,
+         time_onset_to_withdrawal)
+
+#### Check last visit date vs. withdrawal date ####
+
+#Select time to each visit variables
+visittimes <- PDcases_Ldopa %>% 
+  dplyr::select(ID, contains("time_V1_to_V"))
+
+lastvisittime <- visittimes %>%
+  gather(key = Key, value = Value, -ID) %>%
+  group_by(ID) %>%   # We group data
+  filter(!is.na(Value)) %>%  # We filter out na values within each group
+  slice(n()) #%>% # We select the last one 
+  #dplyr::select(Key)
+
+# We will use to derive the last visit vailable for each patient
+lastvisit_VisitNumber = lastvisittime %>%
+  mutate(Key = gsub(".*_V", "", Key))
+
+
+#Create time from study entry to most recent follow-up visit
+PDcases_Ldopa <- PDcases_Ldopa %>% 
+  left_join(lastvisittime, by = "ID") %>% 
+  rename(time_V1_to_lastvisit = "Value")
+
+#Sensibility check - all withdrawal dates should be after the last visit date (mostly)
+check_lastDate <- PDcases_Ldopa %>% 
+  filter(time_V1_to_lastvisit > time_baseline_to_withdrawal) %>% 
+  dplyr::select(ID, time_V1_to_lastvisit, withdrawal_date, time_baseline_to_withdrawal)
+
+# Check time_V1_to_lastvisit
+check_timeMissing = PDcases_Ldopa %>%
+  filter( (is.na(time_V1_to_lastvisit)) & (V1_UPDRS_IV_1 < 2)) %>%
+  select(ID, contains("age"), contains("time"), 
+         disease_duration_onset_imput,
+        contains("UPDRS_IV_1"))
+
+# Exclude patients with only BL data
+PDcases_Ldopa = PDcases_Ldopa %>% 
+  filter(!ID %in% check_timeMissing$ID)
+
+PDcases_Ldopa <- PDcases_Ldopa %>%
+  mutate(time_onset_to_lastvisit = time_V1_to_lastvisit + disease_duration_onset_imput)
+
+
+
+## Get time onset to last visit
+missing_dates <- PDcases_Ldopa %>% 
+  filter(is.na(time_V1_to_lastvisit) & is.na(time_baseline_to_withdrawal)) %>% 
+  dplyr::select(ID, time_baseline_to_withdrawal, time_V1_to_lastvisit, time_onset_to_lastvisit, withdrawal_date, Withdrawn, age_V1, age_V4, age_V7, age_V9, age_V10)
+
+
+
+# Save this data
+fwrite("../data/PDcases_Ldopa_QC.txt", col.names=T, row.names = F, sep = "\t", quote = F)
+
+
+```
+
+
+
+In this chunk of code, we calculate the time to dyskinesia for ppl reaching the LiD threshold
+```{r}
+
+
+### EXPLORE HOW MANY PEOPLE ARE LEFT CENSORED
+check_leftcensored = PDcases_Ldopa %>% 
+  select(ID, V1_UPDRS_III_total, contains(c("time", "duration", "UPDRS_IV_1"))) %>%
+  filter(V1_UPDRS_IV_1 >= 2)
+
+# We first get the longitudinal data accounting for the severity of dyskinesia
+UPDRS_4_1 <- PDcases_Ldopa %>% 
+  dplyr::select(ID, contains("UPDRS_IV_1"))
+
+
+# Here we get all the IDs that developed severe dyskinesia (>=2) at any time point
+updrsScore <- UPDRS_4_1 %>%
+  gather(key = Key, value = Value, -ID) %>%
+  group_by(ID) %>%   # We group data
+  filter(!is.na(Value) & Value >= 2) 
+# We get a new column with the time point number and we order by that new variable
+updrsScore <- updrsScore %>% add_column(v_number = parse_number(updrsScore$Key))
+updrsScore<- updrsScore %>% arrange(v_number) %>%
+  slice(1L) 
+
+
+## Checking there is no repeated IDs so that I filtered as I was expecting
+dim(updrsScore)[1]
+length(unique(updrsScore$ID))
+
+# Now we calculate the time from baseline to the dyskinesia measure above or equal 2. If patients presented dyskinesia at baseline (V1), then = 0
+timeDysk_updrsIII_Ldopadose = as.data.frame(matrix(ncol = 10, nrow = dim(updrsScore)[1]))
+timeDysk_updrsIII_Ldopadose$V1 = updrsScore$ID
+timeDysk_updrsIII_Ldopadose <- timeDysk_updrsIII_Ldopadose %>%
+  dplyr::rename(ID = V1,
+                time_Event = V2,
+                time = V3,
+                time2 = V4,
+                time_Event_midpoint = V5,
+                LdopaDose = V6,
+                UPDRSIIItotal= V7,
+                left_censored = V8,
+                visit_number = V9,
+                age_outcome = V10)
+
+## We get time to event in intervals to incorporate left consored data (time  and time2 columns)
+## We also get time to event as normal time points (time_Event)
+
+for (row in 1:nrow(updrsScore)) {
+  sampleID = updrsScore$ID[row]
+  time_variable = paste("time_V1_to_V",updrsScore$v_number[row], sep = "")
+  age_variable = paste("age_V",updrsScore$v_number[row], sep = "")
+  updrsIII_variable = paste("V",updrsScore$v_number[row],"_","UPDRS_III_total",sep = "")
+  # Now we have to access the main tibble by the ID sample
+  # 1.We get the row index of the sample ID on the tibble
+  indexID = which(PDcases_Ldopa$ID == sampleID)
+  #Time dyskinesia
+  
+  
+  if (time_variable == "time_V1_to_V1") { 
+    timeDysk_updrsIII_Ldopadose[row, 2] = 0
+    timeDysk_updrsIII_Ldopadose[row, 3] = 0
+    timeDysk_updrsIII_Ldopadose[row, 4] = 0
+    timeDysk_updrsIII_Ldopadose[row, 5] = 0
+    timeDysk_updrsIII_Ldopadose[row, 8] = 1
+    timeDysk_updrsIII_Ldopadose[row, 10] = PDcases_Ldopa$age_V1[row]
+
+    }
+  # Since I am measusring from baseline to dyskinesia, for V1 = 0
+  else {
+    
+    value = as.data.frame(PDcases_Ldopa[indexID, time_variable])
+    timeDysk_updrsIII_Ldopadose[row, 2] = value[1,1]
+    timeDysk_updrsIII_Ldopadose[row, 3] = value[1,1]
+    timeDysk_updrsIII_Ldopadose[row, 4] = value[1,1]
+    timeDysk_updrsIII_Ldopadose[row, 5] = value[1,1] - 0.75 # We define the time to event as the midpoint from the visit the outcome was met
+    timeDysk_updrsIII_Ldopadose[row, 8] = 0
+    timeDysk_updrsIII_Ldopadose[row, 10] = PDcases_Ldopa[[indexID, age_variable]]
+  }
+  
+  #LdopaDose
+  timeDysk_updrsIII_Ldopadose[row,6] =  LdopaDoses_data %>% 
+    filter(ID == sampleID & Visit == updrsScore$v_number[row] ) %>%
+    dplyr::pull(LEDD_levo)
+  # UPDRSIII score
+  timeDysk_updrsIII_Ldopadose[row, 7] = PDcases_Ldopa[[indexID,updrsIII_variable]]
+  timeDysk_updrsIII_Ldopadose[row, 9] = updrsScore$v_number[row]
+
+}
+
+
+# Get UPDRS data
+# Imputing the missing motor scores from the mean motor scores
+UPDRSIII_summary
+
+UPDRS_3_total <- PDcases_Ldopa %>% 
+  dplyr::select(ID, contains("UPDRS_III_total")) %>%
+  filter(ID %in% updrsScore$ID) %>%
+  arrange(ID)
+
+
+# We also need the UPDRS 3 total in updrs data frame
+updrsScore$UPDRSIIItotal  <- timeDysk_updrsIII_Ldopadose$UPDRSIIItotal
+
+# Now we merge witht the UPDRSIII total 
+updrsScore  <- updrsScore %>% left_join(UPDRS_3_total)
+updrsScore["UPDRSIII_imputed"] <- as.double(NA)
+
+prevNextVisit = hash()
+prevNextVisit[["1"]] <- c(1,4)
+prevNextVisit[["4"]] <- c(1,7)
+prevNextVisit[["7"]] <- c(4,9)
+prevNextVisit[["9"]] <- c(7,10)
+prevNextVisit[["10"]] <- c(9,11)
+prevNextVisit[["11"]] <- c(10,11)
+
+
+# We perform the imputation in this for loop.
+# Basically, for people having NA at the visit of interest, we look at the previous and the next visit, and in case of present, I calculate the missing motor score
+# at the visit of interest by subtracting or adding the differences in the mean motor scores between next or previous and the mean motor score for the visit of interest
+for (row in 1:nrow(updrsScore)) {
+  if (is.na(updrsScore$UPDRSIIItotal[row])) {
+    # The time point with NA motor score
+    key = as.character(updrsScore$v_number[row])
+    updrsIII = paste("V",key,"_","UPDRS_III_total",sep = "")
+    
+    # The previous and next time motor scroes with respect to the current NA position
+    timePoint_previous = prevNextVisit[[key]][1]
+    updrsIII_previous = paste("V",timePoint_previous,"_","UPDRS_III_total",sep = "")
+    timePoint_next = prevNextVisit[[key]][2]
+    updrsIII_next = paste("V",timePoint_next,"_","UPDRS_III_total",sep = "")
+    
+    if (!is.na((updrsScore[[row, updrsIII_previous]]))) {
+      updrsScore[row, "UPDRSIII_imputed"] = (updrsScore[[row,updrsIII_previous]]) + 
+        (UPDRSIII_summary[[1, updrsIII]] - UPDRSIII_summary[[1, updrsIII_previous]])
+    }  else if ((!is.na((updrsScore[[row,updrsIII_next]])))) {
+      updrsScore[row, "UPDRSIII_imputed"] = (updrsScore[[row,updrsIII_next]]) - 
+        (UPDRSIII_summary[[1, updrsIII_next]] - UPDRSIII_summary[[1, updrsIII]]) 
+    }   else { 
+      updrsScore[row, "UPDRSIII_imputed"] = NA
+    }
+    
+  } else {
+    updrsScore[row,"UPDRSIII_imputed"] = updrsScore$UPDRSIIItotal[row]
+  }
+  
+}
+
+
+## Sensitivity check. 
+# Sample 10 individuals and visually nspect the times to events are as expected
+set.seed(123)
+rndn_10 = sample_n(timeDysk_updrsIII_Ldopadose,10, replace = F) %>%
+  inner_join(PDcases_Ldopa %>% select(ID, contains(c("UPDRS_IV_1","time", "duration"))))
+
+
+# At this point, I can end up with the time to event from onset to the event
+# Calculate time from onset to the development of severe dyskinesia
+timeDysk_updrsIII_Ldopadose <- PDcases_Ldopa %>% dplyr::select(ID, disease_duration_onset_imput) %>%
+  inner_join(timeDysk_updrsIII_Ldopadose, by = "ID") %>%
+  mutate(time = ifelse(time_Event == 0,0 - disease_duration_onset_imput, disease_duration_onset_imput + time),
+         time_Event = disease_duration_onset_imput  + time_Event,
+         time2 = disease_duration_onset_imput  + time2,
+         time_Event_midpoint = disease_duration_onset_imput  + time_Event_midpoint)  %>%
+  select(-disease_duration_onset_imput)
+
+
+# I can create the event_dyskinesia variable
+# All the samples on the updrsScore dataset develop dyskinesia
+timeDysk_updrsIII_Ldopadose$event_dyskinesia <- 1
+
+timeDysk_updrsIII_Ldopadose <- as_tibble(timeDysk_updrsIII_Ldopadose) %>%
+  rename(timeEvent_LdopaDose = LdopaDose,
+         timeEvent_UPDRSIIItotal_imputed = UPDRSIIItotal) %>%
+  relocate(event_dyskinesia, .after = ID)
+
+
+timeDoseVisit_withdrawal <- LdopaDoses_data %>%
+  group_by(ID) %>%
+  slice(tail(row_number(),2)) %>%
+  ungroup() %>%
+  filter(!(ID %in% timeDysk_updrsIII_Ldopadose$ID))
+
+```
+
+
+
+
+
+Now, we start getting motor score and levodopa dose data for those patients that withdrew or completed the study until last visit
+
+```{r}
+####---- Getting the motor score as well as the  the Ldopa dose for patients that withdrew or completed last visit ---####
+
+# We filter these PD patients on Ldopa but that did not develop dyskinesias
+# We get the visit of interest and also the previous visit to impute the Ldopa dose. In case of missing, I get for that patient the previous Ldopa dose
+# Just duoing this, becuase normally the changes in Ldopa dose are not substantial and kind of match among visits for long periods looking at the inidividual level
+
+timeDoseVisit_withdrawal <- LdopaDoses_data %>%
+  group_by(ID) %>%
+  slice(tail(row_number(),2)) %>%
+  ungroup() %>%
+  filter(!(ID %in% timeDysk_updrsIII_Ldopadose$ID))
+
+
+# A second filter will be to remove individuals that only appear once in timeDoseVisit_withdrawal and keep them to merge them after 
+#looping for people imputabl according to my apporach ( with two visits)
+
+PatientsOneRegistryOnly <- timeDoseVisit_withdrawal %>% group_by(ID) %>% 
+  count() %>% filter(n == 1) %>% pull(ID)
+PatientsOneRegistryOnly <- timeDoseVisit_withdrawal %>%
+  filter(timeDoseVisit_withdrawal$ID %in% PatientsOneRegistryOnly) %>%
+  mutate(LEDD_levo_imputed = LEDD_levo)  # Just to match with the other subset
+
+timeDoseVisit_withdrawal <- timeDoseVisit_withdrawal %>%
+  filter(!(ID %in% PatientsOneRegistryOnly$ID))
+
+timeDoseVisit_withdrawal$LEDD_levo_imputed = as.numeric(NA)
+for (lastVisit in seq(from= 2, to = nrow(timeDoseVisit_withdrawal), by = 2)) {
+  #print(lastVisit)
+  if (is.na(timeDoseVisit_withdrawal$LEDD_levo[lastVisit])) {
+    timeDoseVisit_withdrawal[lastVisit, "LEDD_levo_imputed"] = timeDoseVisit_withdrawal$LEDD_levo[lastVisit -1]
+  }
+  else {
+    timeDoseVisit_withdrawal[lastVisit, "LEDD_levo_imputed"] = timeDoseVisit_withdrawal$LEDD_levo[lastVisit]
+  }
+}
+
+
+timeDoseVisit_withdrawal <- timeDoseVisit_withdrawal %>%
+  group_by(ID) %>%
+  slice(n()) %>%
+  ungroup() 
+timeDoseVisit_withdrawal <- bind_rows(timeDoseVisit_withdrawal, PatientsOneRegistryOnly)
+
+# Now, we impute the motor score but the approach will be slightly different to the previous one.
+UPDRS_3_total_NoDysk <- PDcases_Ldopa %>% 
+  dplyr::select(ID, contains("UPDRS_III_total")) %>%
+  filter(!(ID %in% timeDysk_updrsIII_Ldopadose$ID)) %>%
+  arrange(ID)
+
+timeDoseVisit_withdrawal <- timeDoseVisit_withdrawal %>% 
+  inner_join(UPDRS_3_total_NoDysk, by = "ID")
+
+
+timeDoseVisit_withdrawal$event_dyskinesia = 0
+timeDoseVisit_withdrawal <- timeDoseVisit_withdrawal %>% 
+  left_join(PDcases_Ldopa %>% dplyr::select(c(ID, time_onset_to_withdrawal, time_onset_to_lastvisit)))
+
+
+timeDoseVisit_withdrawal <- timeDoseVisit_withdrawal %>%
+  mutate(time_Event = ifelse(!is.na(time_onset_to_withdrawal), time_onset_to_withdrawal, time_onset_to_lastvisit),
+         time = time_Event,
+         time2 = NA,
+         time_Event_midpoint = time_Event,
+         event_dyskinesia = 0,
+         left_censored = 0)
+
+
+# Now we can filter the variables of inteterest and merge with the df containing dyskinesias samples
+timeDoseVisit_withdrawal <- timeDoseVisit_withdrawal %>%
+  mutate(time_Event = ifelse(!is.na(time_onset_to_withdrawal), time_onset_to_withdrawal, time_onset_to_lastvisit),
+         time_Event_midpoint = time_Event,
+         event_dyskinesia = 0,
+         left_censored = 0)
+
+timeDoseVisit_withdrawal <- timeDoseVisit_withdrawal %>%
+  dplyr::select(c(ID,event_dyskinesia, time_Event, time, time2,time_Event_midpoint,
+                  LEDD_levo_imputed, left_censored, visit_number = Visit, 
+                  age_outcome = age,)) %>%
+  dplyr::rename(timeEvent_LdopaDose = LEDD_levo_imputed)
+
+finalDataset = bind_rows(timeDoseVisit_withdrawal, timeDysk_updrsIII_Ldopadose) %>%
+  arrange(ID)
+
+
+
+
+```
+
+
+Now, we merge the LiD and non LiD data
+
+```{r}
+finalDataset = bind_rows(timeDoseVisit_withdrawal, timeDysk_updrsIII_Ldopadose) %>%
+  arrange(ID)
+
+
+## Adding Ldopa status at baseline
+# Get Ldopa status at BL
+head(LdopaDoses_data)
+# There are no NAs, which is great
+length(which(is.na(LdopaDoses_data$Ldopa_bin)))
+Ldopa_bin_BL = LdopaDoses_data %>%
+  filter(Visit == 1) %>%
+  select(ID, Ldopa_bin) 
+# Add Ldopa bin at BL to finalDataset 
+finalDataset = finalDataset %>%
+  left_join(Ldopa_bin_BL)
+
+
+# Here, as these samples are not developing dyskinesias, I decide to not remove the NAs for LEDD_levo
+# To try to retrieve this data, I will lake at right the previous point. If it is available, I will use the infor for that dose
+
+# I may have to filter out the NAs for the Ldopa dose and the UPDRSIII motor score
+length(which(is.na(finalDataset$timeEvent_LdopaDose)))
+length(which(is.na(finalDataset$timeEvent_UPDRSIIItotal_imputed)))
+finalDataset
+
+# Check this interesting people.
+# They got LID before they started levodopa treatment!!!
+check_negative_PDmedsdisdur = PDcases_Ldopa[ (which(PDcases_Ldopa$PDmeds_duration < 0)), ]
+```
+
+
+
+Get all covariates we will use in the model
+
+```{r}
+copy_PDcases_Ldopa = PDcases_Ldopa
+PDcases_Ldopa <- PDcases_Ldopa %>%
+  left_join(finalDataset, by = "ID")
+
+PDcases_Ldopa <- PDcases_Ldopa %>%
+  inner_join(tpd_fam, by = c("IID" = "V2")) %>%
+  rename(FID = V1, SEX = gender)
+
+# In order to match the IID on the PCs and fam file ready to do the survival analysis...
+PDcases_Ldopa$IID <- paste(PDcases_Ldopa$FID, PDcases_Ldopa$IID, sep = "_")
+
+# Covariates adjusting by motor severity
+PDcases_Ldopa <- PDcases_Ldopa %>% 
+  select(ID, IID, event_dyskinesia, time_Event, time, time2, time_Event_midpoint, left_censored,
+         SEX, age_onset_imput, disease_duration_onset_imput,
+         timeEvent_UPDRSIIItotal_imputed, timeEvent_LdopaDose,
+         Ldopa_bin, PDmeds_duration) %>%
+  mutate(AAO.std = scale(age_onset_imput)) %>%
+  relocate(AAO.std, .after = age_onset_imput)
+
+PDcases_Ldopa <- PDcases_Ldopa %>% mutate(SEX=as.factor(recode(SEX,
+                                                            `male`=1L, `female`=2L)))
+
+
+# Save the data
+fwrite(PD_final, "../data/TPD_ALL.txt", colnames=T, row.names = F, sep = "\t", quote = F)
+
+
+
+#ProBanD data summary stratified by LiD group
+PDcases_Ldopa %>% 
+  split(.$event_dyskinesia) %>%
+  map(summary)
+
+```
+
+
+
+
+
+## DATA QC - PDSTAT
+```{r}
+# See all the initial samples
+cat("Initial number of samples:", dim(pdstat_demographics)[1])
+# Checking all the patients are idiopathic PD
+unique(pdstat_demographics$Screening_IdiopathicPD)
+
+### REMOVE LONG DIS DUR ####
+
+# Get the demographic variables of interest
+pdstat_demographics <- pdstat_demographics %>%
+  dplyr::select(StudyNumber, Screening_Gender, Screening_Age, 
+                Screening_IdiopathicPD, Screening_AgeOnsetPD, Screening_Age,
+                M12_GSS_StudyName , Participant_Died, Date_of_Death, Withdrew)
+
+
+# Check patients with disease duration > 10 
+pdstat_demographics <- pdstat_demographics %>%
+  mutate(disDur = Screening_Age -  Screening_AgeOnsetPD)
+
+ggplot(pdstat_demographics, mapping = aes(disDur)) +
+  geom_histogram(color = "black", fill = "white") +
+  theme_bw()
+# Too many people with long disease duration
+pdstat_demographics <- pdstat_demographics %>%
+  mutate(longdisdur = ifelse(disDur > 10, 1, 0))
+pdtat_demographics %>% group_by(longdisdur) %>% count()
+
+senstivityCheck = pdstat_demographics %>%
+  filter(disDur < 0)
+
+pdstat_demographics = pdstat_demographics %>%
+  filter(longdisdur == 0)
+
+
+
+#### REMOVE LEFT CENSORING  ####
+
+# Selecting the UPDRS4 variable of interest and joining with the demographics df
+demographics_dyskinesia <- pdstat_updrs4_data %>%
+  select( (contains(c("StudyNumber","DyskinesiasScore"))) & (!starts_with("M26")) ) %>%
+  inner_join(pdtat_demographics, by = "StudyNumber")
+demographics_dyskinesia %>% DT::datatable(rownames = FALSE,
+                options = list(scrollX = TRUE),
+                class = 'white-space: nowrap')
+
+# Remove left censored patients
+left_censored = demographics_dyskinesia %>%
+  filter(M00_MDSUPDRS_PartIV_DyskinesiasScore >= 2) %>% 
+  pull(StudyNumber) 
+demographics_dyskinesia = demographics_dyskinesia %>%
+  filter(!StudyNumber %in% left_censored)
+
+# Convert to long format and remove patients that only have data at BL
+demographics_dyskinesia_LONG = demographics_dyskinesia %>%
+  pivot_longer(
+    cols = ends_with("DyskinesiasScore"),
+    names_to = "visit_number",
+    names_prefix = "M",
+    values_to = "score",
+    values_drop_na = FALSE) %>%
+  filter(!is.na(score)) %>%
+  mutate(visit_number = as.numeric(gsub("([0-9]+).*$", "\\1", visit_number))) 
+
+demographics_dyskinesia_LONG  %>%
+  group_by(visit_number) %>%
+  count()
+
+
+###### REMOVE DUPLICATE SAMPLES ACROSS STUDIES ######
+
+# Dealing with sample overlap among studies
+pattern_remove <- c("Tracking Parkinson", "Discovery","Oxford","Proband", "OPDC")
+demographics_dyskinesia <- demographics_dyskinesia %>%
+  mutate(overlap = ifelse(is.na(M12_GSS_StudyName), "keep",
+                          ifelse(grepl(paste(pattern_remove, collapse = "|"),
+                                       M12_GSS_StudyName), "remove", "keep"))) %>%
+  filter(overlap != "remove") %>%
+  dplyr::select(-overlap)
+
+
+
+
+##### Check if there is any patient with onlye BL data avail #####
+
+# If there is such patients with only one entry, we can assume it is a patient that only had data at BL
+length(which(is.na(demographics_dyskinesia$M00_MDSUPDRS_PartIV_DyskinesiasScore)))
+# There is no patients with only one entry
+visits_count = demographics_dyskinesia_LONG %>% group_by(StudyNumber) %>%
+  count() %>% filter(n < 2)
+
+
+
+### Levodopa criteria ####
+# According to the study sample inclusion criteria, all samples were on levodopa treatment
+
+
+
+```
+
+
+
+Get time to event data
+```{r}
+# DYSKINESIA 
+
+# Get the variavle summarising ppl devweloping dyskinesias and the month
+UPDRS_4_1 <- demographics_dyskinesia %>% 
+  dplyr::select(StudyNumber, contains("UPDRS_PartIV"))
+
+# For UDRS4.1>=2
+UPDRS_4_1_long_2 <- UPDRS_4_1 %>%
+  gather(key = "Visit", value = Value, -StudyNumber) %>%
+  filter((!is.na(Value)) & (Value >= 2)) %>%
+  mutate(visit_number_dyskinesia = parse_number(.[["Visit"]]))
+# Now we group and arrange on decreasing order each group to finally get 
+# the earliest time point people developed LID
+UPDRS_4_1_long_2 <- UPDRS_4_1_long_2 %>% 
+  group_by(StudyNumber) %>%   
+  arrange(visit_number_dyskinesia)  %>%
+  slice(1L) %>% # We then slice the earliest time point ( in other words the earliest time point at which people developed LID)
+  ungroup() %>%
+  add_column(event_dyskinesia = 1) %>%
+  select(-c(Visit, Value))
+
+demographics_dyskinesia = demographics_dyskinesia %>%
+  left_join(UPDRS_4_1_long_2, by ="StudyNumber") %>% 
+  mutate(event_dyskinesia = replace_na(event_dyskinesia, 0))
+# Check number of people developing dyskinesias between the disease duration groups
+demographics_dyskinesia %>% group_by(longdisdur, event_dyskinesia) %>% count()
+
+
+
+
+# Get the withdrawal month for ppl that withdrew during the drug trial
+withdrawn_people <- (which(demographics_dyskinesia$Withdrew == 1))
+withdrawn_df <- as_tibble(demographics_dyskinesia[withdrawn_people, ]) %>% 
+  select(StudyNumber, contains("MDSUPDRS"))
+
+withdrawn_df_long = withdrawn_df %>%
+  gather(key = "Visit", value = Value, -StudyNumber) %>%
+  filter(is.na(Value)) %>%
+  mutate(visit_number_withdrawal = parse_number(.[["Visit"]])) %>%
+  group_by(StudyNumber) %>%   
+  arrange(visit_number_withdrawal) %>%
+  slice(1L) %>% # We then slice the earliest time point ( in other words the earliest time point at which people withdrew)
+  ungroup() %>%
+  select(-c(Visit, Value))
+
+
+demographics_dyskinesia = demographics_dyskinesia %>%
+  left_join(withdrawn_df_long, by = "StudyNumber") 
+
+
+#Calculate time to event
+demographics_dyskinesia = demographics_dyskinesia %>% 
+  mutate(time_Event = ifelse(event_dyskinesia == 1, (Screening_Age - Screening_AgeOnsetPD) + ((visit_number_dyskinesia/12) - 6),
+                                         ifelse((event_dyskinesia == 0) & (is.na(Withdrew)), (Screening_Age - Screening_AgeOnsetPD) + (24/12),
+                                                ifelse((event_dyskinesia == 0) & (!is.na(Withdrew)) & (is.na(visit_number_withdrawal)),
+                                                       (Screening_Age - Screening_AgeOnsetPD) + (24/12),
+                                                        ifelse((event_dyskinesia == 0) & (Withdrew == 1) &  (!is.na(visit_number_withdrawal)), 
+                                                               (Screening_Age - Screening_AgeOnsetPD) + ((visit_number_withdrawal/12) + (1 / 12)), NA)))))
+
+
+# Finally we add a measure of the motor score at BL
+demographics_dyskinesia = demographics_dyskinesia %>%
+  left_join(pdstat_updrs3_data %>% select(StudyNumber, M00_MDSUPDRS_PartIII_Off_Total))
+```
+
+
+
+Save the data
+
+```{r}
+# Prior saving the data, we must use the codebreakrer to connect genetic and
+# clinical files
+codebreaker <- codebreaker %>%
+  mutate(Study.ID = stringr::str_extract(codebreaker$Study.ID, "[0-9]+")) %>% as_tibble()
+
+
+demographics_dyskinesia <- demographics_dyskinesia %>%
+  left_join(codebreaker, by = c("StudyNumber" = "Study.ID")) %>%
+  left_join(fam_file %>% dplyr::select(V1,V2), by = c("DNA_ID" = "V2")) %>%
+  dplyr::rename(FID = V1, IID = DNA_ID) %>%
+  dplyr::filter(!is.na(IID)) %>%
+  dplyr::relocate(c(FID,IID), .after = StudyNumber) %>%
+  dplyr::mutate(IID = paste(FID, IID, sep = "_")) %>%
+  dplyr::select(-FID)
+
+
+PDSTAT_final = demographics_dyskinesia %>%
+  select(StudyNumber, IID,
+         SEX = Screening_Gender, AAB = Screening_Age, AAO = Screening_AgeOnsetPD,
+         disDur, longdisdur, MDSUPDRSIII = M00_MDSUPDRS_PartIII_Off_Total,
+         time_Event, event_dyskinesia) %>%
+  mutate(SEX = as.factor(as.character(SEX)),
+         AAO.std = scale(AAO),
+         disDur.std = scale(disDur),
+         MDSUPDRSIII.std = scale(MDSUPDRSIII))
+
+
+pdstat = fread(PDSTAT_final, "../data/PDSTAT_ALL.txt", col.names = T, row.names = F, sep = "\t", quote = F)
+```
+
+
+
+## DATA QC - PPMI
+
+
+```{r}
+#### Exclude ptients that have not taken levodopa during study length  #####
+ppmi_PD_IDs <- gsub("[^0-9]", "", ppmi_PD_IDs$V1) %>% as.integer()
+PD_only <- subset(ppmi_all_visits, PATNO %in% ppmi_PD_IDs) # Alternatively,  PD_only <- all_visits %>% filter(PATNO %in% PD_IDs)
+
+# Get all people that took levodopa at some point during the study
+ppmi_PD_medication <- ppmi_PD_medication %>% filter(ONLDOPA == 1) 
+PDmed_IDs <- ppmi_PD_medication %>% select(PATNO) %>% 
+  unique() %>% pull(PATNO)
+# Cross check with PD_MED_USE from 
+PD_medication_V2 <- ppmi_Original_Cohort %>% filter(PD_MED_USE %in% c(1,4,5,7))
+setdiff(PD_medication_V2$PATNO, ppmi_PD_medication$PATNO) # looks good
+# Finally, we extract all the PD cases that took Ldopa at some time point
+PD_Ldopa <- PD_only %>% filter(PATNO %in% PDmed_IDs)
+print(paste0("There are ", length(unique(PD_Ldopa$PATNO)), " PD patients that took Ldopa at some time point"))
+
+
+
+
+
+#### Exclude patients with long disease duration ####
+BL_disdur = ppmi_Original_Cohort %>%
+  filter(PATNO %in% PD_IDs) %>%
+  filter(EVENT_ID == "BL") %>%
+  mutate(durOnset = (duration / 12) + (agediag - ageonset)) %>%
+  select(PATNO, durOnset, age, agediag, ageonset, updrs3_score, updrs3_score_on)
+LONGDISDUR = BL_disdur %>% filter(durOnset > 10)
+PD_Ldopa = PD_Ldopa %>% filter(!PATNO %in% LONGDISDUR$PATNO)
+
+
+
+
+
+#### Missing longitudinal data ####
+# Check data points at each visit
+number_visits = PD_Ldopa %>%
+  group_by(PATNO) %>% summarise(count = n()) 
+no_long_data = number_visits %>% filter(count == 1) %>%
+  pull(PATNO)
+PD_Ldopa = PD_Ldopa %>%
+  filter(!PATNO %in% no_long_data)
+
+
+
+
+
+#### Data wrangling - Adding sex to the df  ####
+ppmi_Screening_Demographics <- ppmi_Screening_Demographics %>% select(PATNO, GENDER)
+PD_Ldopa <- PD_Ldopa %>% inner_join(ppmi_Screening_Demographics, by= "PATNO")
+# Code females (0 or 1) as only 1
+#PD_Ldopa <- PD_Ldopa %>% mutate(GENDER = recode(GENDER, `0` = 1L)) 
+# Recode GENDER in plink format
+# In PPMI 1 or 0 == Female, and 2 == Male
+# We need to put in PLINK format 1 == Male, 2 == Female
+PD_Ldopa <- PD_Ldopa %>%  
+  dplyr::mutate(GENDER = dplyr::recode(GENDER, `1`=2L, `0` = 2L, `2`=1L)) 
+
+# I get the age at baseline, age at diagnosis, and also AAO. Furthermore, I filter by V04,V06,V08,V10,V12,V14,V16
+PD_Ldopa <- PD_Ldopa %>% left_join(BL_disdur, by = c("PATNO"))
+PD_Ldopa <- PD_Ldopa %>% filter(!EVENT_ID %in% c("ST", "U01", "PW")) 
+## Missing one thing here. First I will need to infer the age for V14 and
+
+
+
+
+
+##### Checking people meeting the outcome across time point ###
+
+# Check data points at each visit
+PD_Ldopa %>% group_by(EVENT_ID) %>% summarise(count = n())
+# Check pp meeting the outcome at each visit
+PD_Ldopa %>% 
+  filter(NP4WDYSK >= 2) %>%
+  group_by(EVENT_ID) %>% summarise(count = n())
+# Check number of distinct people meeting the outcome at some point
+PD_outcome = PD_Ldopa %>% 
+  filter(NP4WDYSK >= 2)
+length(unique(PD_outcome$PATNO))
+
+# Check the final subset is PD
+Conclusion_Participation_PD_filt = ppmi_Conclusion_Participation %>% filter(PATNO %in% PD_Ldopa$PATNO)
+unique(Conclusion_Participation_PD_filt$WDRSNCM) # looks good
+
+
+
+```
+
+
+
+Get the outcomes on the QCed data 
+
+```{r}
+### working with Date onset, date withdrawal and date at visit variables ####
+# In the PD_Features data frame, we have got month and year of symptom (SXMO, SXYEAR). Put this on as.Date format - Will be useful when calculating time to events and so forth
+# We need month day, year
+
+#######################################################
+x <- "2009"
+# Where n are the right characters we want to subtract
+substrRight <- function(x, n){
+  substr(x, nchar(x)-n+1, nchar(x))
+}
+#Trying the function works as I expect
+substrRight(x, 2)
+#######################################################
+
+
+# DATE AT EACH VISIT #
+PD_Ldopa <- PD_Ldopa %>% separate(INFODT, c("visit_month","visit_year"), remove = FALSE)
+PD_Ldopa$visit_year <- substrRight(PD_Ldopa$visit_year, 2)
+PD_Ldopa <- PD_Ldopa %>% mutate(date_visit = as.Date(paste(PD_Ldopa$visit_month, "01", PD_Ldopa$visit_year, sep = "-"))) %>%
+  select(-c(visit_month,visit_year))
+
+
+# DATE DIAGNOSIS
+ppmi_PD_Features <- ppmi_PD_Features %>% separate(PDDXDT, c("PDDXDT_month", "PDDXDT_year"))
+ppmi_PD_Features$PDDXDT_year <- substrRight(ppmi_PD_Features$PDDXDT_year, 2)
+Pppmi_D_Features <- ppmi_PD_Features %>% mutate(date_diagnosis = as.Date(paste(ppmi_PD_Features$PDDXDT_month,"01",ppmi_PD_Features$PDDXDT_year, sep = "-")))
+
+
+# DATE ONSET VARAIBLE #
+ppmi_PD_Features$SXYEAR <- substrRight(ppmi_PD_Features$SXYEAR, 2)
+# First thing to do is to impute the NA values. SOme people are missing the month the symptom started. For them, we impute as the mean month
+ppmi_PD_Features$SXMO[is.na(ppmi_PD_Features$SXMO)] <- "6"
+# Then, we paste 0 before the month number, and add day 01 to each
+ppmi_PD_Features <- ppmi_PD_Features %>% mutate(SXMO = ifelse(nchar(SXMO) == 1, paste0("0",SXMO), SXMO))
+ppmi_PD_Features <- ppmi_PD_Features %>% mutate(date_onset = as.Date(paste(ppmi_PD_Features$SXMO,"01",ppmi_PD_Features$SXYEAR, sep = "-")))
+
+
+# DATE WITHDRAWAL VARIABLE#
+ppmi_Conclusion_Participation <- ppmi_Conclusion_Participation %>% separate(WDDT, c("WDDT_month","WDDT_year"))
+
+month_number <- c("Aug" = "08", "Jun" = "06", "Mar" = "03", "Sep" = "09", "May" = "05", "Oct" = "10",
+                  "Nov" = "11", " " = "NA", "Dec" = "12", "Jul" = "07", "Feb" = "02", "Apr" = "04", "Jan" = "01")
+
+ppmi_Conclusion_Participation <- ppmi_Conclusion_Participation %>% mutate(WDDT_month = unname(month_number[ppmi_Conclusion_Participation$WDDT_month]))
+ppmi_Conclusion_Participation <- ppmi_Conclusion_Participation %>% mutate(date_withdrawal = as.Date(paste(ppmi_Conclusion_Participation$WDDT_month,
+                                                                                                "01",ppmi_Conclusion_Participation$WDDT_year, sep = "-")))
+
+# Then I join the PD_Ldopa dataset with the date_with and date_onset variables
+PD_Ldopa <- PD_Ldopa %>% 
+  left_join(ppmi_PD_Features[,c("PATNO","date_onset", "date_diagnosis")], by = "PATNO") %>%
+  left_join(ppmi_Conclusion_Participation[ ,c("PATNO","COMPLT","date_withdrawal")], by = "PATNO")
+
+
+### Getting date to last visit
+# I have seen that I have got too many missing withdrawal dates. 
+# To avoid losing data for such thing we retrieve the last visit for each PD_Ldopa patients. In case we do not have withdrawal info for a patient,
+# we will use last visit as withdrawal date
+lastVisit <- as_tibble(PD_Ldopa %>%  ## ASK MANUELA FOR THIS CODE, DO NOT GET TO UNDERSTAND IT PROPERLY
+  group_by(PATNO) %>%   # We group data
+  filter(!is.na(INFODT)) %>%  # We filter out na values within each group
+  slice(n()) %>%# We select the last one 
+  ungroup())
+
+# We recode the info variable, so we will use to calculate time from onset to dyskinesa
+lastVisit <- lastVisit %>% separate(INFODT, c("visit_month","visit_year"), remove = FALSE)
+lastVisit$visit_year <- substrRight(lastVisit$visit_year, 2)
+lastVisit <- lastVisit %>% mutate(last_followup_date = as.Date(paste(lastVisit$visit_month, "01", lastVisit$visit_year, sep = "-"))) %>%
+  select(-c(visit_month,visit_year))
+
+lastVisit <- lastVisit %>% select(PATNO, last_followup_date)
+
+# Then, I join the time to dyskinesia to the main df
+PD_Ldopa <- PD_Ldopa %>% left_join(lastVisit, by = "PATNO")
+
+
+# No samples missing data onset
+missingDate_onset <- PD_Ldopa[which(is.na(PD_Ldopa$date_onset)), ] 
+unique(missingDate_onset$PATNO)
+
+
+#Correct dates out of range
+#Sensible range is anything from 2011 to today
+sensible_range <- interval(mdy("1-01-11"), today())
+PD_Ldopa %>% 
+  filter(!(mdy(date_withdrawal)) %within% sensible_range) %>% 
+  select(PATNO, date_withdrawal)
+# There is no dates out of range
+
+
+
+### Getting/wrangling the dyskinesia data and generating event dyskinesia variable 
+# I group by ID, then I filter those developing dyskinesia (UPDRS 1 or 2), 
+#I arrange by decreasing time point and select the first time point at which they meet the filter
+dysk <- as_tibble(PD_Ldopa %>% 
+  group_by(PATNO) %>% 
+  filter((!is.na(NP4WDYSK)) & (NP4WDYSK >= 2)) %>%
+  arrange(EVENT_ID) %>%
+  slice(1L) %>%
+  ungroup())
+# We have 70 people developing LID
+
+
+# We recode the info variable, so we will use to calculate time from onset to dyskinesa
+dysk <- dysk %>% separate(INFODT, c("visit_month","visit_year"), remove = FALSE)
+dysk$visit_year <- substrRight(dysk$visit_year, 2)
+dysk <- dysk %>% mutate(date_dyskinesia = as.Date(paste(dysk$visit_month, "01", dysk$visit_year, sep = "-"))) %>%
+  select(-c(visit_month,visit_year))
+
+# No people developed LID before V04.
+# From VO4 to V12, data is recorded every 6 months
+# From V12 on, data
+
+dysk <- dysk %>% select(PATNO, MONTH_DYSKEVENT = EVENT_ID, date_dyskinesia)
+
+PD_Ldopa_oneEntry =  PD_Ldopa %>%
+  group_by(PATNO) %>% 
+  arrange(EVENT_ID) %>%
+  slice(n()) %>% ungroup()
+
+# Then, I join the time to dyskinesia to the main df
+PD_Ldopa_oneEntry <- PD_Ldopa_oneEntry %>% left_join(dysk, by = "PATNO") %>%
+  mutate(event_dysk = ifelse(PATNO %in% dysk$PATNO, 1, 0)) 
+
+
+# We seelct the last entry so that we can keep an eye at EVENT_ID when we will have to derive the time midpoint
+# Nobody withdrew before V04 
+# Therefore, we have to patterns:
+#V04-V12 ( 6 months) 
+#V12 on 12 months
+
+#### Time to event dyskinesia calculation
+
+
+
+to_match = c(paste0("V0", 4:9), paste0("V", 10:12))
+
+
+PD_Ldopa_oneEntry <-  PD_Ldopa_oneEntry %>%
+    mutate(time_Event = ifelse((event_dysk == 1) & (MONTH_DYSKEVENT %in% to_match), ((mdy(date_dyskinesia) - mdy(date_onset)) - 3)/365.2425,
+                               
+                               ifelse((event_dysk == 1) & (!MONTH_DYSKEVENT %in% to_match), ((mdy(date_dyskinesia) - mdy(date_onset)) - 6)/365.2425,
+                                      
+                                      ifelse((event_dysk == 0) & (!is.na(date_withdrawal)), (mdy(date_withdrawal) - mdy(date_onset))/365.2425,
+                                             
+                                              ifelse((event_dysk == 0) & (is.na(date_withdrawal)) & (EVENT_ID %in% to_match), 
+                                                     ((mdy(last_followup_date) - mdy(date_onset)) + 3)/365.2425,
+                                                     
+                                                     ifelse((event_dysk == 0) & (is.na(date_withdrawal)) & (!EVENT_ID %in% to_match), 
+                                                            ((mdy(last_followup_date) - mdy(date_onset)) + 6)/365.2425, NA)))))) 
+
+
+PD_Ldopa_oneEntry[which(is.na(PD_Ldopa_oneEntry$time_Event)), ] # Looks good
+
+
+### Counting the number of people taking Ldopa at some time point that developed dyskinesia ###
+PD_Ldopa_oneEntry %>%
+  tally(event_dysk == 1 )
+```
+
+
+
+Get LEDD data 
+
+```{r}
+# Finally I want to get the LEDD at either last visit or when the dyskinesias outcome is met
+PD_Ldopa_oneEntry = PD_Ldopa_oneEntry %>%
+  mutate(EVENT_ID = ifelse(!is.na(MONTH_DYSKEVENT), MONTH_DYSKEVENT, EVENT_ID)) %>%
+  select(-MONTH_DYSKEVENT)
+
+
+# We select the variables we need and we also get unique PATNOs
+PD_Ldopa_final <- PD_Ldopa_oneEntry %>%
+  select(-c(REC_ID, F_STATUS, PAG_NAME, INFODT, starts_with("NP"), ORIG_ENTRY, 
+            LAST_UPDATE, QUERY, SITE_APRV, date_visit, date_onset, date_diagnosis,
+            COMPLT, date_withdrawal, last_followup_date, date_dyskinesia)) %>%
+   rename(SEX = GENDER)
+which(is.na(PD_Ldopa_final$ageonset))
+
+
+# Get LEDD at event ID
+PD_Ldopa_final = PD_Ldopa_final %>% 
+  left_join(ppmi_Original_Cohort %>% select(PATNO, EVENT_ID, LEDD))
+length(which(is.na(PD_Ldopa_final$LEDD)))
+# LEDD is not suitable. A lot of missing data
+
+```
+
+
+Some data summary stratified by dyskinesia event
+
+```{r}
+PD_Ldopa_final %>% summary
+
+# Check differences between dyskinesias and non dyskinesias group
+PD_Ldopa_final %>%
+  split(.$event_dysk) %>%
+  map(summary)
+
+PD_Ldopa_final %>% group_by(event_dysk, SEX) %>% count()
+# Explore further data (ie MOCA, HY, and so on)
+
+```
+
+
+Save results
+
+```{r}
+
+# Adding PPMISI to the PATNO number to match fam file
+PD_Ldopa_final$PATNO <- paste0("PPMISI", PD_Ldopa_final$PATNO)
+
+# Scale some variables
+PD_Ldopa_final = PD_Ldopa_final %>%
+  mutate(SEX = as.factor(as.character(SEX)),
+         ageonset.std = scale(ageonset),
+         updrs3_score.std = scale(updrs3_score),
+         durOnset.std = scale(durOnset))
+
+
+### Merging ###
+PD_IDs_fam <- PD_Ldopa_final %>% inner_join(ppmi_fam, by = c("PATNO" = "V1")) %>%
+  select(PATNO, V2) %>%
+  rename(FID = PATNO, IID = V2)
+PD_IDs_sex <- PD_Ldopa_final %>% inner_join(ppmi_fam, by = c("PATNO" = "V1")) %>%
+  select(PATNO, V2, SEX) %>%
+  rename(FID = PATNO, IID = V2)
+
+
+### Writing the files I will use to filter/update genetic files in PLINK ###
+write.table(PD_IDs_fam, file = "/home/amcalejandro//Data/WorkingDirectory/PPMI/genetic_data/PD_IDs_fam.txt",
+            sep = "\t", quote = FALSE, row.names = FALSE)
+write.table(PD_IDs_sex, file = "/home/amcalejandro//Data/WorkingDirectory/PPMI/genetic_data/PD_IDs_sex.txt", 
+            sep = "\t", quote = FALSE, row.names = FALSE)
+
+
+fread(PD_Ldopa_final, "../data/PPMI_ALL.txt", sep = "\t", quote = F, col.names = T, row.names = F)
+```
+
+
+

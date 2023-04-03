@@ -1,0 +1,661 @@
+---
+title: 'Dyskinesia_PDSTAT_processing'
+author: 
+- name: "Alejandro M.Carrasco"
+  affiliation: UCL
+output: 
+  html_document:
+    code_folding: hide
+    theme: paper
+    highlight: kate
+    df_print: paged
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)      # For tidy manipulation of data
+library(here)           # For file path construction
+library(DT)             # To display data tables
+library(readxl)         # To read excel files
+library(stringr)        # To do string operations
+theme_rhr <-  theme_bw(base_family = "Helvetica") + 
+  theme(panel.grid.major.x = element_blank(),
+        legend.position = "right",
+        strip.text = element_text(size = 8),
+        strip.text.y = element_text(angle = 90),
+        axis.text.x = element_text(size = 8, angle = 90, hjust = 1, vjust = 0.5),
+        axis.text.y = element_text(size = 8),
+        axis.title.y = element_text(vjust = 0.6),
+        axis.title = element_text(size = 10),
+        panel.spacing = unit(0.1, "lines"))
+knitr::opts_chunk$set(echo = T, warning = F, message= F)
+```
+
+
+> We aim to clean up the PDSTAT dataset and get the variables needed to develop the cox proportional model for the dyskinesias analysis with and without motor conditioning
+
+
+# Data description
+
+The aim of this clinical study is to determine whether simvastatin has the potential to slow PD progression Randomized, placebo-controlled, study with PD patients of mild-moderate severity.
+Patients aged between 40 and 90 years with a diagnosis of diopathic PD, HY < 3.0 in the ON medication state. Patients have to be on dopamine with wearing-off pehnomenon
+Three clinical visits ( baseline, 12months, 24months).
+Of note, we assume all patients are under a Levodope treatment.
+
+# Data loading 
+
+```{r}
+updrs4_data <- readxl::read_xlsx("/home/amcalejandro/Data/WorkingDirectory/PDSTAT/clinical_data/FUP_Export_CRF_MDSUPDRS_PartIV.xlsx")
+demographics  <- readxl::read_xlsx("/home/amcalejandro/Data/WorkingDirectory/PDSTAT/clinical_data/Export_check.xlsx")
+fam_file <- fam_file <- read.table("/home/amcalejandro/Data/WorkingDirectory/PDSTAT/genetic_data/PDSTAT.fam", quote="\"", comment.char="")
+updrs3_data <- readxl::read_xlsx("/home/amcalejandro/Data/WorkingDirectory/PDSTAT/clinical_data/FUP_Export_CRF_MDSUPDRS_PartIII_Off.xlsx")
+codebreaker <- read.delim("/home/amcalejandro/Data/WorkingDirectory/PDSTAT/clinical_data/PDSTAT_NEUROCHIP_IDs.txt")
+
+medicationBL <- readxl::read_xlsx("/home/amcalejandro/Data/WorkingDirectory/PDSTAT/clinical_data/FUP_Export_CRF_PDMedicationsDetails_M00_Lev.xlsx")
+
+
+```
+
+
+Apply exclussion criteria consistent to what we have done for OPDC and PROBAND
+
+- Exclude patients with disease duration > 10 Years (Done)
+- Exclude left censored patients (Done)
+- Exclude patients with only baseline data (Done)
+- Exclude patients that have not taken levodopa during the entire study
+- We define the outcome as the midpoint between visits 
+
+# Data exploration  (UNDER DEVELOPMENT)
+
+Here, we perform some basic data exploration. We get some summary statistics for variables of particular interest, clinical milestones,...
+
+```{r}
+# See all the initial samples
+cat("Initial number of samples:", dim(demographics)[1])
+# Checking all the patients are idiopathic PD
+unique(demographics$Screening_IdiopathicPD)
+```
+
+
+```{r}
+
+### REMOVE LONG DIS DUR ####
+
+# Get the demographic variables of interest
+demographics <- demographics %>%
+  dplyr::select(StudyNumber, Screening_Gender, Screening_Age, 
+                Screening_IdiopathicPD, Screening_AgeOnsetPD, Screening_Age,
+                M12_GSS_StudyName , Participant_Died, Date_of_Death, Withdrew)
+
+
+# Check patients with disease duration > 10 
+demographics <- demographics %>%
+  mutate(disDur = Screening_Age -  Screening_AgeOnsetPD)
+
+ggplot(demographics, mapping = aes(disDur)) +
+  geom_histogram(color = "black", fill = "white") +
+  theme_bw()
+# Too many people with long disease duration
+demographics <- demographics %>%
+  mutate(longdisdur = ifelse(disDur > 10, 1, 0))
+demographics %>% group_by(longdisdur) %>% count()
+
+senstivityCheck = demographics %>%
+  filter(disDur < 0)
+
+demographics = demographics %>%
+  filter(longdisdur == 0)
+
+
+
+#### REMOVE LEFT CENSORING  ####
+
+# Selecting the UPDRS4 variable of interest and joining with the demographics df
+demographics_dyskinesia <- updrs4_data %>%
+  select( (contains(c("StudyNumber","DyskinesiasScore"))) & (!starts_with("M26")) ) %>%
+  inner_join(demographics, by = "StudyNumber")
+demographics_dyskinesia %>% DT::datatable(rownames = FALSE,
+                options = list(scrollX = TRUE),
+                class = 'white-space: nowrap')
+
+# Remove left censored patients
+left_censored = demographics_dyskinesia %>%
+  filter(M00_MDSUPDRS_PartIV_DyskinesiasScore >= 2) %>% 
+  pull(StudyNumber) 
+demographics_dyskinesia = demographics_dyskinesia %>%
+  filter(!StudyNumber %in% left_censored)
+
+# Convert to long format and remove patients that only have data at BL
+demographics_dyskinesia_LONG = demographics_dyskinesia %>%
+  pivot_longer(
+    cols = ends_with("DyskinesiasScore"),
+    names_to = "visit_number",
+    names_prefix = "M",
+    values_to = "score",
+    values_drop_na = FALSE) %>%
+  filter(!is.na(score)) %>%
+  mutate(visit_number = as.numeric(gsub("([0-9]+).*$", "\\1", visit_number))) 
+
+demographics_dyskinesia_LONG  %>%
+  group_by(visit_number) %>%
+  count()
+
+
+###### REMOVE DUPS ######
+
+# Dealing with sample overlap among studies
+pattern_remove <- c("Tracking Parkinson", "Discovery","Oxford","Proband", "OPDC")
+demographics_dyskinesia <- demographics_dyskinesia %>%
+  mutate(overlap = ifelse(is.na(M12_GSS_StudyName), "keep",
+                          ifelse(grepl(paste(pattern_remove, collapse = "|"),
+                                       M12_GSS_StudyName), "remove", "keep"))) %>%
+  filter(overlap != "remove") %>%
+  dplyr::select(-overlap)
+
+
+```
+
+
+
+# Data wrangling
+
+In this step, we start processing the data to get the variables needed for our analysis and 
+apply some exclussion criteria
+```{r}
+# Get the demographic variables of interest
+demographics <- demographics %>%
+  dplyr::select(StudyNumber, Screening_Gender, Screening_Age, 
+                Screening_IdiopathicPD, Screening_AgeOnsetPD, Screening_Age,
+                M12_GSS_StudyName , Participant_Died, Date_of_Death, Withdrew)
+
+
+# Dealing with sample overlap among studies
+pattern_remove <- c("Tracking Parkinson", "Discovery","Oxford","Proband", "OPDC")
+demographics <- demographics %>%
+  mutate(overlap = ifelse(is.na(M12_GSS_StudyName), "keep",
+                          ifelse(grepl(paste(pattern_remove, collapse = "|"),
+                                       M12_GSS_StudyName), "remove", "keep"))) %>%
+  filter(overlap != "remove") %>%
+  dplyr::select(-overlap)
+
+
+# Check patients with disease duration > 10 
+demographics <- demographics %>%
+  mutate(disDur = Screening_Age -  Screening_AgeOnsetPD)
+
+ggplot(demographics, mapping = aes(disDur)) +
+  geom_histogram(color = "black", fill = "white") +
+  theme_bw()
+# Too many people with long disease duration
+demographics <- demographics %>%
+  mutate(longdisdur = ifelse(disDur > 10, 1, 0))
+demographics %>% group_by(longdisdur) %>% count()
+
+senstivityCheck = demographics %>%
+  filter(disDur < 0)
+
+```
+
+
+# Removing left censored patients or those with only BL data
+
+```{r}
+# Selecting the UPDRS4 variable of interest and joining with the demographics df
+demographics_dyskinesia <- updrs4_data %>%
+  select( (contains(c("StudyNumber","DyskinesiasScore"))) & (!starts_with("M26")) ) %>%
+  inner_join(demographics, by = "StudyNumber")
+demographics_dyskinesia %>% DT::datatable(rownames = FALSE,
+                options = list(scrollX = TRUE),
+                class = 'white-space: nowrap')
+
+
+# Remove left censored patients
+left_censored = demographics_dyskinesia %>%
+  filter(M00_MDSUPDRS_PartIV_DyskinesiasScore >= 2) %>% 
+  pull(StudyNumber) 
+demographics_dyskinesia = demographics_dyskinesia %>%
+  filter(!StudyNumber %in% left_censored)
+
+# Convert to long format and remove patients that only have data at BL
+demographics_dyskinesia_LONG = demographics_dyskinesia %>%
+  pivot_longer(
+    cols = ends_with("DyskinesiasScore"),
+    names_to = "visit_number",
+    names_prefix = "M",
+    values_to = "score",
+    values_drop_na = FALSE) %>%
+  filter(!is.na(score)) %>%
+  mutate(visit_number = as.numeric(gsub("([0-9]+).*$", "\\1", visit_number))) 
+
+demographics_dyskinesia_LONG  %>%
+  group_by(visit_number) %>%
+  count()
+
+# If there is such patients with only one entry, we can assume it is a patient that only had data at BL
+length(which(is.na(demographics_dyskinesia$M00_MDSUPDRS_PartIV_DyskinesiasScore)))
+# There is no patients with only one entry
+visits_count = demographics_dyskinesia_LONG %>% group_by(StudyNumber) %>%
+  count() %>% filter(n < 2)
+
+```
+
+
+# Remove patients that have not taken Levodopa durin the study length
+
+```{r}
+
+# CHECK THE INCLUSSION CRITERIA.
+# AN INCLUSION CRITERIA FROM THE DRUG TRIAL WAS TO BE UNDER DOPAMINERGIC TREATMENT
+
+
+```
+
+
+
+```{r}
+# DYSKINESIA 
+
+# Get the variavle summarising ppl devweloping dyskinesias and the month
+UPDRS_4_1 <- demographics_dyskinesia %>% 
+  dplyr::select(StudyNumber, contains("UPDRS_PartIV"))
+
+# For UDRS4.1>=2
+UPDRS_4_1_long_2 <- UPDRS_4_1 %>%
+  gather(key = "Visit", value = Value, -StudyNumber) %>%
+  filter((!is.na(Value)) & (Value >= 2)) %>%
+  mutate(visit_number_dyskinesia = parse_number(.[["Visit"]]))
+# Now we group and arrange on decreasing order each group to finally get 
+# the earliest time point people developed LID
+UPDRS_4_1_long_2 <- UPDRS_4_1_long_2 %>% 
+  group_by(StudyNumber) %>%   
+  arrange(visit_number_dyskinesia)  %>%
+  slice(1L) %>% # We then slice the earliest time point ( in other words the earliest time point at which people developed LID)
+  ungroup() %>%
+  add_column(event_dyskinesia = 1) %>%
+  select(-c(Visit, Value))
+
+demographics_dyskinesia = demographics_dyskinesia %>%
+  left_join(UPDRS_4_1_long_2, by ="StudyNumber") %>% 
+  mutate(event_dyskinesia = replace_na(event_dyskinesia, 0))
+# Check number of people developing dyskinesias between the disease duration groups
+demographics_dyskinesia %>% group_by(longdisdur, event_dyskinesia) %>% count()
+
+
+
+
+# Get the withdrawal month for ppl that withdrew during the drug trial
+withdrawn_people <- (which(demographics_dyskinesia$Withdrew == 1))
+withdrawn_df <- as_tibble(demographics_dyskinesia[withdrawn_people, ]) %>% 
+  select(StudyNumber, contains("MDSUPDRS"))
+
+withdrawn_df_long = withdrawn_df %>%
+  gather(key = "Visit", value = Value, -StudyNumber) %>%
+  filter(is.na(Value)) %>%
+  mutate(visit_number_withdrawal = parse_number(.[["Visit"]])) %>%
+  group_by(StudyNumber) %>%   
+  arrange(visit_number_withdrawal) %>%
+  slice(1L) %>% # We then slice the earliest time point ( in other words the earliest time point at which people withdrew)
+  ungroup() %>%
+  select(-c(Visit, Value))
+
+
+demographics_dyskinesia = demographics_dyskinesia %>%
+  left_join(withdrawn_df_long, by = "StudyNumber") 
+
+
+
+
+#Calculate time to event
+demographics_dyskinesia = demographics_dyskinesia %>% 
+  mutate(time_Event = ifelse(event_dyskinesia == 1, (Screening_Age - Screening_AgeOnsetPD) + ((visit_number_dyskinesia/12) - 6),
+                                         ifelse((event_dyskinesia == 0) & (is.na(Withdrew)), (Screening_Age - Screening_AgeOnsetPD) + (24/12),
+                                                ifelse((event_dyskinesia == 0) & (!is.na(Withdrew)) & (is.na(visit_number_withdrawal)),
+                                                       (Screening_Age - Screening_AgeOnsetPD) + (24/12),
+                                                        ifelse((event_dyskinesia == 0) & (Withdrew == 1) &  (!is.na(visit_number_withdrawal)), 
+                                                               (Screening_Age - Screening_AgeOnsetPD) + ((visit_number_withdrawal/12) + (1 / 12)), NA)))))
+
+
+
+# Finally we add a measure of the motor score at BL
+demographics_dyskinesia = demographics_dyskinesia %>%
+  left_join(updrs3_data %>% select(StudyNumber, M00_MDSUPDRS_PartIII_Off_Total))
+
+```
+
+# Saving the data 
+
+```{r}
+# Prior saving the data, we must use the codebreakrer to connect genetic and
+# clinical files
+codebreaker <- codebreaker %>%
+  mutate(Study.ID = stringr::str_extract(codebreaker$Study.ID, "[0-9]+")) %>% as_tibble()
+
+
+demographics_dyskinesia <- demographics_dyskinesia %>%
+  left_join(codebreaker, by = c("StudyNumber" = "Study.ID")) %>%
+  left_join(fam_file %>% dplyr::select(V1,V2), by = c("DNA_ID" = "V2")) %>%
+  dplyr::rename(FID = V1, IID = DNA_ID) %>%
+  dplyr::filter(!is.na(IID)) %>%
+  dplyr::relocate(c(FID,IID), .after = StudyNumber) %>%
+  dplyr::mutate(IID = paste(FID, IID, sep = "_")) %>%
+  dplyr::select(-FID)
+  
+
+
+PDSTAT_final = demographics_dyskinesia %>%
+  select(StudyNumber, IID,
+         SEX = Screening_Gender, AAB = Screening_Age, AAO = Screening_AgeOnsetPD,
+         disDur, longdisdur, MDSUPDRSIII = M00_MDSUPDRS_PartIII_Off_Total,
+         time_Event, event_dyskinesia) %>%
+  mutate(SEX = as.factor(as.character(SEX)),
+         AAO.std = scale(AAO),
+         disDur.std = scale(disDur),
+         MDSUPDRSIII.std = scale(MDSUPDRSIII))
+
+#saveRDS(PDSTAT_final, file = "/home/amcalejandro/Data/WorkingDirectory/GITHUB_REPOS/Dyskinesia_Project/data_processed/PDSTAT_dyskinesia.rds")
+
+```
+
+
+
+
+
+```{r}
+surv_object_dyskinesia <- Surv(time = PDSTAT_final$time_Event, event = PDSTAT_final$event_dyskinesia)
+###
+#### MODELS USING THE EXACT TIME OUTCOME WITH RIGHT CENSORING
+###
+
+#---Plot Kaplan-Meier curve and cox model  for gender vs dyskinesia---####
+fit_gender_dyskinesia <- survfit(surv_object_dyskinesia ~ SEX, data = PDSTAT_final)
+summary(fit_gender_dyskinesia)
+ggsurvplot(fit_gender_dyskinesia, data = PDSTAT_final, pval = TRUE, xlab = "years", ylab = "dyskinesia probability")
+
+
+# SEX is not found as significant predictor of time to dyskinesias in OPDC
+
+
+#Fit Cox Proportional Hazards model for mortality vs. gender
+fit_genderAAO_dyskinesia_coxph = coxph(surv_object_dyskinesia ~ SEX + AAO, data = PDSTAT_final)
+summary(fit_genderAAO_dyskinesia_coxph)
+# Proportional assumption is met
+cox.zph(fit_genderAAO_dyskinesia_coxph )
+
+
+# AAO is not a significant predictor either and it meets the proportional hazard assumption borderline
+fit_genderAAO_disdur_dyskinesia <- survfit(surv_object_dyskinesia ~ SEX  + AAO + disDur, data = PDSTAT_final)
+fit_genderAAO_disdur_dyskinesia_coxph = coxph(surv_object_dyskinesia ~ SEX +  AAO + disDur, data = PDSTAT_final)
+summary(fit_genderAAO_disdur_dyskinesia_coxph)
+# Proportional assumption is met
+cox.zph(fit_genderAAO_disdur_dyskinesia_coxph )
+# Checking multicolinearity
+vif(fit_genderAAO_disdur_dyskinesia_coxph )
+
+
+# Exlude disease duration. It does not meet the proportional hazard assumption at all
+
+
+fit_gender_AAO_mororScore_dyskinesia_coxph = coxph(surv_object_dyskinesia ~ SEX + AAO +
+                                                           MDSUPDRSIII, data = PDSTAT_final)
+summary(fit_gender_AAO_mororScore_dyskinesia_coxph)
+# Proportional assumption is met
+cox.zph(fit_gender_AAO_mororScore_dyskinesia_coxph )
+# Checking multicolinearity
+vif(fit_gender_AAO_mororScore_dyskinesia_coxph)
+
+
+
+# Try and add potential condounders  or intermediary variables
+#Fit Cox Proportional Hazards model for mortality vs. gender
+fit_gender_AAO_mororScoredisdur_dyskinesia_coxph = coxph(surv_object_dyskinesia ~ SEX + AAO + disDur +
+                                                           MDSUPDRSIII , data = PDSTAT_final)
+summary(fit_gender_AAO_mororScoredisdur_dyskinesia_coxph)
+# Proportional assumption is met
+cox.zph(fit_gender_AAO_mororScoredisdur_dyskinesia_coxph )
+# Checking multicolinearity
+vif(fit_gender_AAO_mororScoredisdur_dyskinesia_coxph)
+
+
+# Compare the models 
+AIC(fit_genderAAO_dyskinesia_coxph, 
+    fit_genderAAO_disdur_dyskinesia_coxph,
+    fit_gender_AAO_mororScore_dyskinesia_coxph,
+    fit_gender_AAO_mororScoredisdur_dyskinesia_coxph)
+
+
+
+# Conclussion. There is no variable that improves the cox model more than the basic model
+# We will run a model with AAO and SEX, and another model with AAO SEX and MDSUPDRSIII
+
+
+# Trying the selected models excluding ppl in long disdur
+
+
+
+PDSTAT_final_V2 = PDSTAT_final %>% filter(longdisdur == 0)
+
+surv_object_dyskinesia <- Surv(time = PDSTAT_final_V2$time_Event, event = PDSTAT_final_V2$event_dyskinesia)
+
+#Fit Cox Proportional Hazards model for mortality vs. gender
+fit_genderAAO_dyskinesia_coxph = coxph(surv_object_dyskinesia ~ SEX + AAO, data = PDSTAT_final_V2)
+summary(fit_genderAAO_dyskinesia_coxph)
+# Proportional assumption is met
+cox.zph(fit_genderAAO_dyskinesia_coxph )
+
+
+fit_gender_AAO_mororScoredisdur_dyskinesia_coxph = coxph(surv_object_dyskinesia ~ SEX + AAO + disDur +
+                                                           MDSUPDRSIII , data = PDSTAT_final_V2)
+summary(fit_gender_AAO_mororScoredisdur_dyskinesia_coxph)
+# Proportional assumption is met
+cox.zph(fit_gender_AAO_mororScoredisdur_dyskinesia_coxph )
+# Checking multicolinearity
+vif(fit_gender_AAO_mororScoredisdur_dyskinesia_coxph)
+
+
+
+```
+
+
+
+
+```{r}
+
+### THIS IS THE WAY THE ANALYSIS STARTED. 
+### WE GOT TWO DYSKINESIAS DEFINITIONS TO START WITH (>=1 & >= 2)
+
+
+
+## Checking there is no repeated IDs so that I filtered as I was expecting
+# cat("The filtering for >=1 has been done correctly:", dim(UPDRS_4_1_long_1)[1] == length(unique(UPDRS_4_1_long_1$StudyNumber)), "\n")
+# cat("The filtering for >=2 has been done correctly:", dim(UPDRS_4_1_long_2)[1] == length(unique(UPDRS_4_1_long_2$StudyNumber)))
+# 
+# # We merge with the main df
+# #demographics_dyskinesia <- demographics_dyskinesia %>%
+# #  left_join(UPDRS_4_1_long_1, by = "StudyNumber") %>%
+# #  mutate(event_dyskinesia = replace_na(event_dyskinesia, 0))
+# 
+# 
+# # Creating a list of data frames
+# list_demographics_dyskinesia = list(df1 = demographics_dyskinesia %>%
+#                                       left_join(UPDRS_4_1_long_1, by ="StudyNumber") %>% 
+#                                       mutate(event_dyskinesia = replace_na(event_dyskinesia, 0)),
+#                                     df2 = demographics_dyskinesia %>%
+#                                       left_join(UPDRS_4_1_long_2, by ="StudyNumber") %>% 
+#                                       mutate(event_dyskinesia = replace_na(event_dyskinesia, 0)))
+
+# Now, with visit number, age study entry and AAO, we can calculate
+# time to dyskinesias from disease onset
+
+# If people did not wihdrew and they did not develop LID, we consider
+# the time between AAO and study entry plus 26 months to the last visit
+
+```
+
+
+```{r}
+# # WITHDRAWAL
+# UPDRS_4_1 <- UPDRS_4_1
+# 
+# # We select the NA value, so this will be the time point from which we 
+# # we approximate the withdrawal data
+# UPDRS_4_1_long <- UPDRS_4_1 %>%
+#   gather(key = "Visit", value = Value, -StudyNumber) %>%
+#   filter(is.na(Value)) %>%
+#   mutate(visit_number_withdrawal = parse_number(.[["Visit"]]))
+# 
+# 
+# # Then we calculate withdrawal_month as the mean point between the first point
+# # a given patient missed the visit, and the previous point.
+# # We take into accounts that between 24 and 26 there is only one month difference
+# UPDRS_4_1_long <- UPDRS_4_1_long %>% 
+#   group_by(StudyNumber) %>%   
+#   arrange(visit_number_withdrawal)  %>%
+#   slice(1L) %>% # We then slice the earliest time point ( in other words the earliest time point at which people withdrew)
+#   ungroup() %>%
+#   mutate(withdrawal_month = ifelse(visit_number_withdrawal == 26, 25, (as.numeric(visit_number_withdrawal) - 6))) %>%
+#   select(-c(Visit, Value))
+# 
+# 
+# 
+# 
+# 
+# for (i in 1:2) {
+# list_demographics_dyskinesia[[i]] <- list_demographics_dyskinesia[[i]] %>%
+#   left_join(UPDRS_4_1_long, by = "StudyNumber")  %>%
+#   left_join(updrs3_data)
+# }
+
+```
+
+
+```{r}
+# # TIME TO EVENT CALCULATION
+# 
+# # Of 
+# for ( i in 1:2) { 
+# list_demographics_dyskinesia[[i]] <- list_demographics_dyskinesia[[i]] %>%
+#   mutate(timeToEvent_dyskinesia = ifelse(event_dyskinesia == 1, (Screening_Age - Screening_AgeOnsetPD) + (visit_number_dyskinesia/12),
+#                                          ifelse(event_dyskinesia == 0 & is.na(Withdrew), (Screening_Age - Screening_AgeOnsetPD) + (26/12),
+#                                                 ifelse(event_dyskinesia == 0 & Withdrew == 1, (Screening_Age - Screening_AgeOnsetPD) + (withdrawal_month/12) , NA))))
+# }
+```
+
+
+
+```{r}
+# MOTOR SCORE IMPUTATION
+
+# Something to know is that I am calculating the motor score from the "on-state"
+# PDSTAT dataset
+
+# To get the motor score at the time of dyskinesias
+# we will have to use:
+  # the visit_number (for dysk people),
+  # the withdrawal month, ( for ppl that withdrew)
+  # 26 months ( for people did not withdrew or did not develop LID)
+
+# Now, we unite these three measures to then get the UPDRSIII_total easily
+
+# Of note, if a sample did not withdraw nor developed LID, I set the visit number
+# to 24, since this is the last time point we have motor data available
+
+# Of note, some people may well have developed LID at the visit 26, but we only have
+# motor score data until the 24 visit, and it is the motor score we will use 
+
+
+
+# for (i in 1:2) {
+#   list_demographics_dyskinesia[[i]] <- list_demographics_dyskinesia[[i]] %>%
+#   mutate(visit_number_merged = ifelse(is.na(visit_number_dyskinesia) & is.na(visit_number_withdrawal), 24, 
+#                                       ifelse(!is.na(visit_number_dyskinesia), visit_number_dyskinesia,
+#                                              ifelse(!is.na(visit_number_withdrawal), visit_number_withdrawal, NA
+#                                                     )
+#                                              )
+#                                       
+#                                       ),
+#          visit_number_merged = replace(visit_number_merged, visit_number_merged == 26, 24))
+# }
+# 
+# # Then, I can easily get the motor score
+# source(here::here("R", "clinicalData_wrangling.R"))
+# # Testing the function works
+# #impute_UPDRSIII(list_demographics_dyskinesia[[1]], ID = "StudyNumber")
+# 
+# # Get the updrs_motor_score and select variables of interest
+# # Of note, I did not exclude samples having NAs on the UPDRSIII_total var
+# # because we do not only generate a model conditioned by the motor severity
+# # We will exclude them afterwards
+# for (i in 1:2) {
+#   motor_data = impute_UPDRSIII(list_demographics_dyskinesia[[i]], ID = "StudyNumber", format = "wide")
+#   
+#   list_demographics_dyskinesia[[i]] <- list_demographics_dyskinesia[[i]] %>%
+#     left_join(motor_data, by = c("StudyNumber", "visit_number_merged" = "visit_number")) %>%
+#    
+#      #list_demographics_dyskinesia[[i]] <- list_demographics_dyskinesia[[i]] %>%
+#        dplyr::select(c(ID = StudyNumber, AAO = Screening_AgeOnsetPD, SEX = Screening_Gender,
+#                   UPDRSIII_totalIMputed, event_dyskinesia, timeToEvent_dyskinesia))
+#   
+# }
+
+```
+
+
+# Data saving
+
+```{r}
+
+# # Prior saving the data, we must use the codebreakrer to connect genetic and
+# # clinical files
+# codebreaker <- codebreaker %>%
+#   mutate(Study.ID = stringr::str_extract(codebreaker$Study.ID, "[0-9]+")) %>% as.tibble()
+# 
+# # Then, we join with the main dataset to exclude those samples that miss the 
+# # genetic data
+# for (i in 1:2) {
+#   list_demographics_dyskinesia[[i]] <- list_demographics_dyskinesia[[i]] %>%
+#     left_join(codebreaker, by = c("ID" = "Study.ID")) %>%
+#     left_join(fam_file %>% dplyr::select(V1,V2), by = c("DNA_ID" = "V2")) %>%
+#     dplyr::rename(FID = V1, IID = DNA_ID) %>%
+#     dplyr::filter(!is.na(IID)) %>%
+#     dplyr::relocate(IID, .after = ID) %>% dplyr::relocate(FID, .before = ID) %>%
+#     dplyr::select(-ID)
+# }
+# 
+# # Total sample after all the filtering and the merging with the genetic data
+# cat("total number of people reamining: ", dim(list_demographics_dyskinesia[[1]])[1])
+# 
+# 
+# # Also, we generate two extra dfs for sex checking and excluding samples that did not pass the previous filtering.
+# # Of note, regardless the covariates file subset ( with or without motor adjustment), the number of samples is the same, so we only need one file
+# PDSTAT_plink.samples <- data.frame(FID = list_demographics_dyskinesia[[1]]$FID, IID = list_demographics_dyskinesia[[1]]$IID)
+# PDSTAT_plink.sex <- data.frame(FID = list_demographics_dyskinesia[[1]]$FID, IID = list_demographics_dyskinesia[[1]]$IID, SEX = list_demographics_dyskinesia[[1]]$SEX)
+# write.table(PDSTAT_plink.samples, file = "../plink_QC/PDSTAT_plink.samples.txt", quote = FALSE, sep = " ", col.names = T, row.names = F)
+# write.table(PDSTAT_plink.sex, file = "../plink_QC/PDSTAT_plink.sex.txt", quote = FALSE, sep = " ", col.names = T, row.names = F)
+# 
+# 
+# 
+# # Finally, we get the IID as a merge of the FID and the IID to match with the format from the imputation output
+# 
+# for (i in 1:2) {
+#   list_demographics_dyskinesia[[i]] <- list_demographics_dyskinesia[[i]] %>%
+#     unite("IID", FID:IID, na.rm = TRUE, remove = TRUE)
+# }
+# 
+# saveRDS(list_demographics_dyskinesia, file = "/home/alejandromc/Data/WorkingDirectory/GITHUB_REPOS/Dyskinesia_Project/data_processed/PDSTAT_dyskinesia.rds")
+
+```
+
+
+# Session info
+
+```{r}
+utils::sessionInfo()
+```
+
+
+
+# Log
+
+- Release

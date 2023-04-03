@@ -1,0 +1,160 @@
+---
+title: 'Get a predictive model'
+author: 
+- name: "Alejandro M.Carrasco"
+  affiliation: UCL
+output: 
+  html_document:
+    code_folding: hide
+    theme: paper
+    highlight: kate
+    df_print: paged
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)      # For tidy manipulation of data
+library(here)           # For file path construction
+library(DT)             # To display data tables
+library(readxl)         # To read excel files
+library(stringr)        # To do string operations
+library(data.table)
+library(survminer)
+library(survival)
+
+my_theme <-  theme_bw(base_family = "Helvetica") + 
+  theme(panel.grid.major.x = element_blank(),
+        legend.position = "right",
+        strip.text = element_text(size = 8),
+        strip.text.y = element_text(angle = 90),
+        axis.text.x = element_text(size = 10, angle = 90, hjust = 1, vjust = 0.5),
+        axis.text.y = element_text(size = 10),
+        axis.title.y = element_text(size = 13, vjust = 0.6),
+        axis.title.x = element_text(size = 13),
+        axis.title = element_text(size = 10),
+        panel.spacing = unit(2, "lines"))
+knitr::opts_chunk$set(echo = T, warning = F, message= F)
+```
+
+
+> Aim: To merge all data file from different cohorts and generate KM curves
+
+# Data load
+
+There is no need of doing any QC. Data has already been QCed.
+We will do minor processing, and then merge
+```{r}
+
+# Load data
+tpd = fread("../data/PROBAND_ALL.txt")
+opdc = fread("../data/OPDC_ALL.txt")
+ppmi = fread("../data/PPMI_ALL.txt")
+pdbp = fread("../data/PDBP_ALL.txt")
+pdstat = fread("../data/PDSTAT_ALL.txt")
+
+
+```
+
+
+```{r}
+new_names = c("chr1_39646765", "chr1_53778300", "chr1_168645690",
+"chr1_168645707", "chr4_32376657", "chr4_32435284", "chr16_17044975")
+tpd_qc = tpd %>%
+  dplyr::filter(left_censored == 0 ) %>%
+  dplyr::select(IID, event_dyskinesia, time_Event = time_Event_midpoint,
+                SEX, AAO = age_onset_imput, DISDUR = disease_duration_onset_imput, 
+                MDSUPDRSIII = timeEvent_UPDRSIIItotal_imputed,
+                LEDD = timeEvent_LdopaDose, starts_with("PC"),
+                22:27) %>%
+  rename_at(vars(colnames(tpd)[grepl(pattern = "_.$", colnames(tpd))]), ~new_names[2:length(new_names)]) 
+
+# Rename strings
+
+
+opdc_qc = opdc %>%
+  dplyr::select(IID, event_dyskinesia, time_Event,
+                SEX, AAO = age_onset, DISDUR = disease_duration_onset_BL, 
+                MDSUPDRSIII = UPDRSIII_imputed_BL,
+                LEDD = LEDD_BL, starts_with("PC"),
+                19:25) %>%
+  rename_at(vars(colnames(opdc)[grepl(pattern = "_.$", colnames(opdc))]), ~new_names)
+
+ppmi_qc = ppmi %>%
+  dplyr::select(IID = PATNO, event_dyskinesia = event_dysk, time_Event,
+                SEX, AAO = ageonset, DISDUR = durOnset, 
+                MDSUPDRSIII = updrs3_score_on, LEDD, starts_with("PC"),
+                21:26) %>%
+  dplyr::mutate(event_dyskinesia = as.numeric(event_dyskinesia)) %>%
+  rename_at(vars(colnames(ppmi)[grepl(pattern = "_.$", colnames(ppmi))]), ~new_names[1:(length(new_names) - 1)])
+
+pdbp_qc = pdbp %>%
+  dplyr::filter(LONG_DISDUR == 0) %>% 
+  dplyr::select(IID = ID, event_dyskinesia = EVENT_DYSK, 
+                time_Event = TIMEMIDPOINT_YEARS, SEX = SEX.x, 
+                AAO = AAD_IMPUTED, DISDUR = DIS_DUR, 
+                MDSUPDRSIII = MDSUPDRSIII_BL, LEDD = DailyLevo,
+                starts_with("PC"), 29:35) %>%
+  rename_at(vars(colnames(pdbp)[grepl(pattern = "_.$", colnames(pdbp))]), ~new_names)
+
+pdstat_qc = pdstat %>%
+  dplyr::filter(longdisdur == 0) %>% 
+  dplyr::select(IID, event_dyskinesia, time_Event,
+                SEX, AAO, DISDUR = disDur, 
+                MDSUPDRSIII, starts_with("PC"), 19:24) %>%
+  rename_at(vars(colnames(pdstat)[grepl(pattern = "_.$", colnames(pdstat))]), ~new_names[c(1, 3:length(new_names))])
+
+
+merge_nopdbp = dplyr::bind_rows(tpd_qc, opdc_qc, ppmi_qc, pdstat_qc)
+merge_all = dplyr::bind_rows( "TPD" = tpd_qc, "OPDC" = opdc_qc,
+                              "PPMI" = ppmi_qc, "PDBP" = pdbp_qc,
+                              "PDSTAT" = pdstat_qc, 
+                              .id = "COHORTS")
+
+#perform minor processing
+merge_all = merge_all %>%
+  mutate(AAO.std = scale(AAO),
+         DISDUR.std = scale(DISDUR),
+         MDSUPDRSIII.std = scale(MDSUPDRSIII),
+         LEDD.std = scale(LEDD))
+merge_nopdbp = merge_nopdbp %>%
+  mutate(AAO.std = scale(AAO),
+         DISDUR.std = scale(DISDUR),
+         MDSUPDRSIII.std = scale(MDSUPDRSIII),
+         LEDD.std = scale(LEDD))
+
+
+summary(merge_all)
+```
+
+
+```{r}
+
+cols <- c("#F76D5E", "#FFFFBF")
+densityplot = merge_all %>%
+  ggplot(aes(x = time_Event, fill = factor(event_dyskinesia))) +
+  #facet_wrap(~COHORTS, scales='free') +
+  facet_wrap(~COHORTS, scales = "free_x") +
+  # ggplot(aes(x = time_Event_midpoint, 
+  #            colour = factor(event_dyskinesia))) +
+  geom_density(lwd = 0.3, linetype = 1, alpha = 0.6) +
+  scale_fill_discrete(name = "Time", labels = c("No Dyskinesias", "Dyskinesias")) +
+  scale_x_continuous(name = "Time", limits = c(0, 20), expand = c(0.01,0.01)) +
+  scale_y_continuous(expand = c(0.002,0.002)) +
+  #labs(fill = "PD group", x = "Time") +
+  #geom_boxplot(aes(x = time_baseline_to_withdrawal, fill = quantileWithdrawal), inherit.aes = FALSE) +
+  scale_color_manual(values = cols) +
+  my_theme +
+  theme(
+  legend.position = c(0.82, 0.25),
+  legend.key.size = unit(0.8, 'cm'), #change legend key size
+  legend.key.height = unit(1, 'cm'), #change legend key height
+  legend.key.width = unit(1, 'cm'), #change legend key width
+  legend.title = element_text(size=14), #change legend title font size
+  legend.text = element_text(size=10)) #change legend text font size
+
+```
+
+
+

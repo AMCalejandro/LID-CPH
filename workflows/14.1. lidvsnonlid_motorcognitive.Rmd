@@ -1,0 +1,197 @@
+---
+title: 'LiD vs PD cognitive and motor performance'
+author: 
+- name: "Alejandro M.Carrasco"
+  affiliation: UCL
+output: 
+  html_document:
+    code_folding: hide
+    theme: paper
+    highlight: kate
+    df_print: paged
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+
+# Load libraries
+
+```{r}
+library(tidyverse)      # For tidy manipulation of data
+library(here)           # For file path construction
+library(DT)             # To display data tables
+library(readxl)         # To read excel files
+library(stringr)        # To do string operations
+library(data.table)
+library(survminer)
+library(survival)
+```
+
+
+# Load data and custom function to process data 
+
+```{r}
+# Load data
+tpd = fread("../data/PROBAND_ALL.txt")
+PDcases_Ldopa = fread("../data/PDcases_Ldopa_QC.txt")
+tpd_clindemo_bl = fread("/home/amcalejandro/Data/WorkingDirectory/PROBAND/clinical_data/P3_full_extract_with_relations.csv")
+tpd_clindemo_lng = fread("/home/amcalejandro/Data/WorkingDirectory/PROBAND/clinical_data/P3_TPD_Version2_temp_06_16_2020.csv")
+tpd_ldopabin = fread("/home/amcalejandro/Data/WorkingDirectory/PROBAND/clinical_data/Tracking_Ldopa_data_2021_03.csv")
+tpd_ldopadoses = fread("/home/amcalejandro/Data/WorkingDirectory/PROBAND/clinical_data/Tracking_Ldopa_data_with_doses_2021_03.csv")S
+lid_visitnumber = readRDS("../data/PDLIDall_visitnumber.rds")
+
+source(here::here("utils/utils.R"))
+```
+
+
+# Get the visit number we will use to get cognitive and motor scores (LID visit or withdrawal visit)
+```{r}
+visittimes <- PDcases_Ldopa %>% 
+  dplyr::select(ID, contains("time_V1_to_V"))
+
+
+lastvisittime <- visittimes %>%
+  gather(key = Key, value = Value, -ID) %>%
+  group_by(ID) %>%   
+  filter(!is.na(Value)) %>% 
+  slice(n())
+
+lastvisit_VisitNumber = lastvisittime %>%
+  mutate(Key = gsub(".*_V", "", Key))
+
+lastvisit_VisitNumber_noDySkinesias = lastvisit_VisitNumber %>%
+  filter(!ID %in% timeDysk_updrsIII_Ldopadose$ID) %>%
+  rename(visit_number = Key) %>%
+  mutate(visit_number = as.numeric(visit_number))
+
+PDLID_VISIT = bind_rows(lastvisit_VisitNumber_noDySkinesias, 
+                        timeDysk_updrsIII_Ldopadose %>% 
+                          select(ID, visit_number))
+saveRDS(PDLID_VISIT, "../../GITHUB_REPOS/Dyskinesia_Project/data/PDLIDall_visitnumber.rds") 
+
+```
+
+
+
+
+# Get the MOCA and rhe opdrs scores at BL and the withdrawal or LiD visit 
+
+```{r}
+
+tpd_clindemo_lng = tpd_clindemo_lng %>%
+  filter(is.na(change_diag_ind))
+
+pattern_vector = c("MOCA", "UPDRS_III_")
+alloutcomes_long = get_assesmentLong(tpd_clindemo_lng, 
+                       outcome_names = pattern_vector) 
+moca_updrs_long = Reduce(dplyr::full_join, alloutcomes_long) %>%
+  mutate(visit_number = as.numeric(visit_number))
+
+# Get all visits except the baseline visit
+moca_visits = unique(moca_updrs_long$visit_number)[-1]
+
+mocaroch_long = 
+  lapply(moca_visits, function(visit, df = moca_updrs_long) {
+    mycols = colnames(df[3:ncol(df)])
+    groupfiltdf = filter_df(data = df, timevar = visit, idvar = id)
+    myoutcomes = outcome_select(df, pattern = mycols)
+    
+    ratechanges = 
+      get_ratechange(groupfiltdf, 
+                     year_var = visit, idvar = id, 
+                     outcome_vars = myoutcomes)
+
+  }) %>% bind_rows()
+
+```
+
+
+# Data processing
+```{r}
+mocaupdrs_bl = moca_updrs_long %>%
+  filter(visit_number ==1 ) %>%
+  dplyr::rename(moca_bl = moca_total,
+                updrsIII_bl = updrs_iii__total) %>%
+  select(-visit_number)
+
+tpd_visitnumber = tpd %>%
+  inner_join(lid_visitnumber %>% ungroup()) %>%
+  inner_join(moca_updrs_long, by = c("visit_number", "ID"="id")) %>%
+  inner_join(mocaupdrs_bl, by = c("ID"="id"))
+
+summary(tpd_visitnumber %>%
+            filter(event_dyskinesia == 0) %>%
+            select(moca_total, moca_bl,
+                   updrs_iii__total, updrsIII_bl))
+summary(tpd_visitnumber %>%
+            filter(event_dyskinesia == 1) %>%
+            select(moca_total, moca_bl,
+                   updrs_iii__total, updrsIII_bl))
+```
+
+
+# Observe data distribution
+
+```{r}
+# Divide in LID and non LID
+tpd_lid = tpd_visitnumber %>%
+  filter(event_dyskinesia ==1)
+tpd_nonlid = tpd_visitnumber %>%
+  filter(event_dyskinesia == 0)
+
+# Check data distribution
+p1 <- ggplot(tpd_lid, aes(moca_bl)) + 
+        geom_histogram(fill = "white", color = "grey30")
+p2 <- ggplot(tpd_nonlid, aes(moca_bl)) + 
+        geom_histogram(fill = "white", color = "grey30") 
+p3 <- ggplot(tpd_lid, aes(moca_total)) + 
+        geom_histogram(fill = "white", color = "grey30")
+p4 <- ggplot(tpd_nonlid, aes(moca_total)) + 
+        geom_histogram(fill = "white", color = "grey30")
+
+
+updrs1 <- ggplot(tpd_visitnumber, aes(updrsIII_bl)) + 
+        geom_histogram(fill = "white", color = "grey30")
+updrs2 <- ggplot(tpd_visitnumber, aes(updrs_iii__total)) + 
+        geom_histogram(fill = "white", color = "grey30") 
+
+moca1 <- ggplot(tpd_visitnumber, aes(moca_bl)) + 
+        geom_histogram(fill = "white", color = "grey30")
+moca2 <- ggplot(tpd_visitnumber, aes(moca_total)) + 
+        geom_histogram(fill = "white", color = "grey30") 
+
+```
+
+
+# Perform the test
+```{r}
+get_ttest = map(res, ~ keep(.x, .p = str_detect(names(.x), "ttest"))) %>% 
+  bind_rows()
+get_ttest = get_ttest$ttest %>%
+    spread(id, t)
+
+rownames(get_ttest) = NULL
+get_ttest$p.value = round(as.numeric(get_ttest$p.value), digit = 4)
+get_ttest$statistic = round(as.numeric(get_ttest$statistic), digit = 4)
+
+
+get_wilcox = map(res, ~ keep(.x, .p = str_detect(names(.x), "wilcoxtest"))) %>% 
+  bind_rows() 
+get_wilcox= get_wilcox$wilcoxtest %>%
+    spread(id, W)
+rownames(get_wilcox) = NULL
+get_wilcox$p.value = round(as.numeric(get_wilcox$p.value), digit = 6)
+get_wilcox$statistic = round(as.numeric(get_wilcox$statistic), digit = 4)
+
+write.csv(get_ttest, "~/Kronos_downloads/LIDttest.csv", quote = F)
+write.csv(get_wilcox, "~/Kronos_downloads/LIDwilcoxtest.csv", quote = F)
+
+
+# Get the two results of the tests
+final_df = rbind(get_wilcox[grep("moca", get_wilcox$VAR), ], get_ttest[grep("updrs", get_ttest$VAR), ])
+write.csv(final_df, "~/Kronos_downloads/mocaupdrswilcoxttest.csv", quote = F)
+```
+
+
+

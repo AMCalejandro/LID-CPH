@@ -1,0 +1,332 @@
+---
+title: 'Model comparison'
+author: 
+- name: "Alejandro M.Carrasco"
+  affiliation: UCL
+output: 
+  html_document:
+    code_folding: hide
+    theme: paper
+    highlight: kate
+    df_print: paged
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+
+
+```{r setup, include=FALSE, warning=FALSE}
+library(plyr)
+library(tidyverse)      # For tidy manipulation of data
+library(here)           # For file path construction
+library(DT)             # To display data tables
+library(readxl)         # To read excel files
+library(survival)
+library(survminer)
+library(data.table)
+```
+
+
+
+# Load the QCed data
+
+```{r}
+tpd = fread("../data/PROBAND_ALL.txt")
+opdc = fread("../data/OPDC_ALL.txt")
+ppmi = fread("../data/PPMI_ALL.txt")
+pdbp = fread("../data/PDBP_ALL.txt")
+pdstat = fread("../data/PDSTAT_ALL.txt")
+
+```
+
+
+# OPDC data model comparison
+
+
+Generate cox regression moels
+```{r}
+
+surv_object_dyskinesia <- Surv(time = opdc$time_Event, event = opdc$event_dyskinesia)
+
+fit_gender_dyskinesia <- survfit(surv_object_dyskinesia ~ SEX, data = opdc)
+summary(fit_gender_dyskinesia)
+ggsurvplot(fit_gender_dyskinesia, data = opdc, pval = TRUE, xlab = "years", ylab = "dyskinesia probability")
+
+
+# SEX is not found as significant predictor of time to dyskinesias in OPDC alone
+
+fit_genderAAO_dyskinesia_coxph = coxph(surv_object_dyskinesia ~ SEX + age_onset, data = opdc)
+summary(fit_genderAAO_dyskinesia_coxph)
+cox.zph(fit_genderAAO_dyskinesia_coxph )
+
+
+fit_genderAAO_disdur_dyskinesia <- survfit(surv_object_dyskinesia ~ SEX  + age_onset + disease_duration_onset_BL, data = opdc)
+fit_genderAAO_disdur_dyskinesia_coxph = coxph(surv_object_dyskinesia ~ SEX +  age_onset + disease_duration_onset_BL, data = opdc)
+summary(fit_genderAAO_disdur_dyskinesia_coxph)
+cox.zph(fit_genderAAO_disdur_dyskinesia_coxph )
+vif(fit_genderAAO_disdur_dyskinesia_coxph )
+
+
+
+fit_gender_AAO_mororScore_dyskinesia_coxph = coxph(surv_object_dyskinesia ~ SEX + age_onset +
+                                                     UPDRSIII_imputed_BL, data = opdc)
+summary(fit_gender_AAO_mororScore_dyskinesia_coxph)
+cox.zph(fit_gender_AAO_mororScore_dyskinesia_coxph )
+vif(fit_gender_AAO_mororScore_dyskinesia_coxph)
+
+
+
+fit_gender_AAO_mororScoreLDOPA_dyskinesia_coxph = coxph(surv_object_dyskinesia ~ SEX + age_onset +
+                                                           UPDRSIII_imputed_BL + LEDD_BL , data = opdc)
+summary(fit_gender_AAO_mororScoreLDOPA_dyskinesia_coxph)
+cox.zph(fit_gender_AAO_mororScoreLDOPA_dyskinesia_coxph )
+vif(fit_gender_AAO_mororScoreLDOPA_dyskinesia_coxph)
+
+
+# Compare the models 
+AIC(fit_genderAAO_dyskinesia_coxph, 
+    fit_genderAAO_disdur_dyskinesia_coxph,
+    fit_gender_AAO_mororScore_dyskinesia_coxph,
+    fit_gender_AAO_mororScoreLDOPA_dyskinesia_coxph)
+BIC(fit_genderAAO_dyskinesia_coxph,
+    fit_genderAAO_disdur_dyskinesia_coxph,
+    fit_gender_AAO_mororScore_dyskinesia_coxph,
+    fit_gender_AAO_mororScoreLDOPA_dyskinesia_coxph)
+
+
+fit_gender_AAOdisdur_mororScoreLDOPA_dyskinesia_coxph = coxph(surv_object_dyskinesia ~ SEX + age_onset +
+                                                           UPDRSIII_imputed_BL + LEDD_BL , data = opdc)
+
+summary(fit_gender_AAOdisdur_mororScoreLDOPA_dyskinesia_coxph)
+cox.zph(fit_gender_AAOdisdur_mororScoreLDOPA_dyskinesia_coxph )
+vif(fit_gender_AAOdisdur_mororScoreLDOPA_dyskinesia_coxph)
+
+```
+
+
+
+# TPD data model comparison
+
+```{r}
+
+PDcases_Ldopa_NoLeftCens = tpd %>%
+  filter(left_censored != 1)
+surv_object_dyskinesia <- Surv(time = PDcases_Ldopa_NoLeftCens$time_Event, event = PDcases_Ldopa_NoLeftCens$event_dyskinesia)
+
+
+fit_gender_dyskinesia <- survfit(surv_object_dyskinesia ~ SEX, data = PDcases_Ldopa_NoLeftCens)
+summary(fit_gender_dyskinesia)
+ggsurvplot(fit_gender_dyskinesia, data = PDcases_Ldopa_NoLeftCens, pval = TRUE, xlab = "years", ylab = "dyskinesia probability")#+
+
+
+
+
+fit_genderAAO_dyskinesia_coxph = coxph(surv_object_dyskinesia ~ SEX + AAO.std, data = PDcases_Ldopa_NoLeftCens)
+summary(fit_genderAAO_dyskinesia_coxph)
+
+cox.zph(fit_genderAAO_dyskinesia_coxph )
+
+
+
+fit_genderAAO_disdur_dyskinesia <- survfit(surv_object_dyskinesia ~ SEX  + 
+                                             AAO.std + 
+                                             disease_duration_onset_imput, data = PDcases_Ldopa_NoLeftCens)
+fit_genderAAO_disdur_dyskinesia_coxph = coxph(surv_object_dyskinesia ~ SEX +  
+                                                AAO.std + 
+                                                disease_duration_onset_imput, data = PDcases_Ldopa_NoLeftCens)
+summary(fit_genderAAO_disdur_dyskinesia_coxph)
+cox.zph(fit_genderAAO_disdur_dyskinesia_coxph )
+vif(fit_genderAAO_disdur_dyskinesia_coxph )
+
+
+
+fit_gender_AAOdisdur_mororScore_dyskinesia_coxph = coxph(surv_object_dyskinesia ~ SEX + AAO.std + disease_duration_onset_imput +
+                                                           timeEvent_UPDRSIIItotal_imputed, data = PDcases_Ldopa_NoLeftCens)
+summary(fit_gender_AAOdisdur_mororScore_dyskinesia_coxph)
+cox.zph(fit_gender_AAOdisdur_mororScore_dyskinesia_coxph )
+vif(fit_gender_AAOdisdur_mororScore_dyskinesia_coxph)
+
+
+
+fit_gender_AAOdisdur_mororScoreLDOPA_dyskinesia_coxph = coxph(surv_object_dyskinesia ~ SEX + AAO.std + 
+                                                                scale(disease_duration_onset_imput) +
+                                                                scale(timeEvent_UPDRSIIItotal_imputed) +
+                                                                scale(timeEvent_LdopaDose), data = PDcases_Ldopa_NoLeftCens)
+summary(fit_gender_AAOdisdur_mororScoreLDOPA_dyskinesia_coxph)
+cox.zph(fit_gender_AAOdisdur_mororScoreLDOPA_dyskinesia_coxph )
+vif(fit_gender_AAOdisdur_mororScoreLDOPA_dyskinesia_coxph)
+
+
+
+# Compare the models 
+AIC(fit_genderAAO_dyskinesia_coxph, 
+    fit_genderAAO_disdur_dyskinesia_coxph,
+    fit_gender_AAOdisdur_mororScore_dyskinesia_coxph,
+    fit_gender_AAOdisdur_mororScoreLDOPA_dyskinesia_coxph)
+BIC(fit_genderAAO_dyskinesia_coxph,
+    fit_genderAAO_disdur_dyskinesia_coxph,
+    fit_gender_AAOdisdur_mororScore_dyskinesia_coxph,
+    fit_gender_AAOdisdur_mororScoreLDOPA_dyskinesia_coxph)
+
+
+
+# Conclusion
+# Ading confounding variables highly increases SEX association
+# AAO no longer significant
+# disease duration keep being significant
+# Ldopa dose is highlt significant
+
+# All variables meet the proportional hazard assumption
+# Overall model has a porportional hazard assumption test pvalue = 0.5
+# VIF suggests no colinearity
+
+# Try and add Ldopa_bin at baseline and also duration in PD meds when people met the outocme
+
+# Try and add potential condounders  or intermediary variables
+#Fit Cox Proportional Hazards model for mortality vs. gender
+
+
+fit_gender_AAOdisdur_mororScoreLDOPAdurbin_dyskinesia_coxph = coxph(surv_object_dyskinesia ~ SEX + AAO.std + disease_duration_onset_imput +
+                                                                timeEvent_UPDRSIIItotal_imputed + timeEvent_LdopaDose +
+                                                                Ldopa_bin + PDmeds_duration , data = PDcases_Ldopa_NoLeftCens)
+summary(fit_gender_AAOdisdur_mororScoreLDOPAdurbin_dyskinesia_coxph)
+cox.zph(fit_gender_AAOdisdur_mororScoreLDOPAdurbin_dyskinesia_coxph)
+vif(fit_gender_AAOdisdur_mororScoreLDOPAdurbin_dyskinesia_coxph)
+
+
+# CONCLUSSION
+
+# After adding Ldopa_bin the system gets singular. There is no dependence between some of predictors. In fact, output from VIF shows LDOPA_bin
+# with a value of e-8
+# In addition, PDmeds_duration in the model the COX PH hazards assumption
+# I tried PDmeds_duration and Ldopa_bin alone with SEX and I got same results
+
+
+```
+
+
+
+# PDSTAT data model comparison
+
+
+```{r}
+surv_object_dyskinesia <- Surv(time = pdstat$time_Event, event = pdstat$event_dyskinesia)
+
+fit_gender_dyskinesia <- survfit(surv_object_dyskinesia ~ SEX, data = pdstat)
+summary(fit_gender_dyskinesia)
+ggsurvplot(fit_gender_dyskinesia, data = pdstat, pval = TRUE, xlab = "years", ylab = "dyskinesia probability")
+
+
+
+fit_genderAAO_dyskinesia_coxph = coxph(surv_object_dyskinesia ~ SEX + AAO, data = pdstat)
+summary(fit_genderAAO_dyskinesia_coxph)
+cox.zph(fit_genderAAO_dyskinesia_coxph )
+
+
+fit_genderAAO_disdur_dyskinesia <- survfit(surv_object_dyskinesia ~ SEX  + AAO + disDur, data = pdstat)
+fit_genderAAO_disdur_dyskinesia_coxph = coxph(surv_object_dyskinesia ~ SEX +  AAO + disDur, data = pdstat)
+summary(fit_genderAAO_disdur_dyskinesia_coxph)
+cox.zph(fit_genderAAO_disdur_dyskinesia_coxph )
+vif(fit_genderAAO_disdur_dyskinesia_coxph )
+
+
+fit_gender_AAO_mororScore_dyskinesia_coxph = coxph(surv_object_dyskinesia ~ SEX + AAO +
+                                                           MDSUPDRSIII, data = pdstat)
+summary(fit_gender_AAO_mororScore_dyskinesia_coxph)
+cox.zph(fit_gender_AAO_mororScore_dyskinesia_coxph )
+vif(fit_gender_AAO_mororScore_dyskinesia_coxph)
+
+
+
+fit_gender_AAO_mororScoredisdur_dyskinesia_coxph = coxph(surv_object_dyskinesia ~ SEX + AAO + disDur +
+                                                           MDSUPDRSIII , data = pdstat)
+summary(fit_gender_AAO_mororScoredisdur_dyskinesia_coxph)
+cox.zph(fit_gender_AAO_mororScoredisdur_dyskinesia_coxph )
+vif(fit_gender_AAO_mororScoredisdur_dyskinesia_coxph)
+
+
+# Compare the models 
+AIC(fit_genderAAO_dyskinesia_coxph, 
+    fit_genderAAO_disdur_dyskinesia_coxph,
+    fit_gender_AAO_mororScore_dyskinesia_coxph,
+    fit_gender_AAO_mororScoredisdur_dyskinesia_coxph)
+
+
+# Conclussion. There is no variable that improves the cox model more than the basic model
+# We will run a model with AAO and SEX, and another model with AAO SEX and MDSUPDRSIII
+
+
+pdstat_V2 = pdstat %>% filter(longdisdur == 0)
+surv_object_dyskinesia <- Surv(time = pdstat_V2$time_Event, event = pdstat_V2$event_dyskinesia)
+fit_genderAAO_dyskinesia_coxph = coxph(surv_object_dyskinesia ~ SEX + AAO, data = pdstat_V2)
+summary(fit_genderAAO_dyskinesia_coxph)
+cox.zph(fit_genderAAO_dyskinesia_coxph )
+
+
+fit_gender_AAO_mororScoredisdur_dyskinesia_coxph = coxph(surv_object_dyskinesia ~ SEX + AAO + disDur +
+                                                           MDSUPDRSIII , data = pdstat_V2)
+summary(fit_gender_AAO_mororScoredisdur_dyskinesia_coxph)
+cox.zph(fit_gender_AAO_mororScoredisdur_dyskinesia_coxph )
+vif(fit_gender_AAO_mororScoredisdur_dyskinesia_coxph)
+
+
+
+```
+
+
+
+# PPMI
+
+# Develop models and see the model metrics for different covariates
+
+```{r}
+
+surv_object_dyskinesia <- Surv(time = ppmi$time_Event, event = ppmi$event_dysk)
+
+fit_gender_dyskinesia <- survfit(surv_object_dyskinesia ~ SEX, data = ppmi)
+summary(fit_gender_dyskinesia)
+ggsurvplot(fit_gender_dyskinesia, data = ppmi, pval = TRUE, xlab = "years", ylab = "dyskinesia probability")
+
+
+fit_genderAAO_dyskinesia_coxph = coxph(surv_object_dyskinesia ~ SEX + ageonset, data = ppmi)
+summary(fit_genderAAO_dyskinesia_coxph)
+cox.zph(fit_genderAAO_dyskinesia_coxph )
+
+
+# AAO is not a significant predictor either and it meets the proportional hazard assumption borderline
+fit_genderAAO_disdur_dyskinesia <- survfit(surv_object_dyskinesia ~ SEX  + ageonset + durOnset, data = ppmi)
+fit_genderAAO_disdur_dyskinesia_coxph = coxph(surv_object_dyskinesia ~ SEX +  ageonset + durOnset, data = ppmi)
+summary(fit_genderAAO_disdur_dyskinesia_coxph)
+cox.zph(fit_genderAAO_disdur_dyskinesia_coxph )
+vif(fit_genderAAO_disdur_dyskinesia_coxph)
+
+
+
+
+fit_gender_AAO_disdur_motorScore_dyskinesia_coxph = coxph(surv_object_dyskinesia ~ SEX + ageonset + durOnset + updrs3_score, data = ppmi)
+summary(fit_gender_AAO_disdur_motorScore_dyskinesia_coxph)
+cox.zph(fit_gender_AAO_disdur_motorScore_dyskinesia_coxph)
+vif(fit_gender_AAO_disdur_motorScore_dyskinesia_coxph)
+
+
+
+fit_gender_AAO_disdur_motorScoreLDOPA_dyskinesia_coxph = coxph(surv_object_dyskinesia ~ SEX + ageonset +
+                                                          durOnset + updrs3_score + scale(LEDD) , data = ppmi)
+summary(fit_gender_AAO_disdur_motorScoreLDOPA_dyskinesia_coxph)
+cox.zph(fit_gender_AAO_disdur_motorScoreLDOPA_dyskinesia_coxph )
+vif(fit_gender_AAO_disdur_motorScoreLDOPA_dyskinesia_coxph)
+
+
+
+# Compare the models 
+AIC(fit_genderAAO_dyskinesia_coxph, 
+    fit_genderAAO_disdur_dyskinesia_coxph,
+    fit_gender_AAO_disdur_motorScore_dyskinesia_coxph,
+    fit_gender_AAO_disdur_motorScoreLDOPA_dyskinesia_coxph)
+
+BIC(fit_genderAAO_dyskinesia_coxph,
+    fit_genderAAO_disdur_dyskinesia_coxph,
+    fit_gender_AAO_disdur_motorScore_dyskinesia_coxph,
+    fit_gender_AAO_disdur_motorScoreLDOPA_dyskinesia_coxph)
+```

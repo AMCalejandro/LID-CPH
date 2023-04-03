@@ -1,0 +1,119 @@
+---
+title: 'Summary metrics for each cohort included in the analysis'
+author: 
+- name: "Alejandro M.Carrasco"
+  affiliation: UCL
+output: 
+  html_document:
+    code_folding: hide
+    theme: paper
+    highlight: kate
+    df_print: paged
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)      # For tidy manipulation of data
+library(here)           # For file path construction
+library(DT)             # To display data tables
+library(readxl)         # To read excel files
+library(stringr)        # To do string operations
+library(data.table)
+source(here::here("utils", "utils.R"))
+
+theme_rhr <-  theme_bw(base_family = "Helvetica") + 
+  theme(panel.grid.major.x = element_blank(),
+        legend.position = "right",
+        strip.text = element_text(size = 8),
+        strip.text.y = element_text(angle = 90),
+        axis.text.x = element_text(size = 8, angle = 90, hjust = 1, vjust = 0.5),
+        axis.text.y = element_text(size = 8),
+        axis.title.y = element_text(vjust = 0.6),
+        axis.title = element_text(size = 10),
+        panel.spacing = unit(0.1, "lines"))
+knitr::opts_chunk$set(echo = T, warning = F, message= F)
+```
+
+
+> AIM: To describe the summary statistics of each cohort included in the analysis after performing all QC steps
+
+
+
+# Set up
+
+
+## Load data
+```{r}
+tpd = fread(paste(here::here(), "data_processed", "TPD_ALL.txt", sep = "/"))
+opdc = readRDS(paste(here::here(), "data_processed", "OPDC_ALL.txt", sep = "/"))
+ppmi = readRDS(paste(here::here(), "data_processed", "PPMI_ALL.txt", sep = "/"))
+pdbp = readRDS(paste(here::here(), "data_processed", "PDBP_ALL.txt", sep = "/"))
+pdstat = readRDS(paste(here::here(), "data_processed", "PDSTAT_ALL.txt", sep = "/"))
+
+tpd_all = fread("/home/amcalejandro/Data/WorkingDirectory/PROBAND/clinical_data/P3_TPD_Version2_temp_06_16_2020.csv")
+opdc_all <- as_tibble(read.csv("~/Data/WorkingDirectory/OPDC/clinical_data/Discovery_FU_data_with_onset_2021_04.csv"))
+```
+
+
+# Get cohort summary statistics 
+
+```{r}
+source(here::here("utils", "utils.R"))
+
+tpd_summary = tpd %>%
+  inner_join(tpd_all %>% select(ID, age_V1, V1_UPDRS_III_total)) %>%
+  my_summary(cohort_name = "TPD",
+             event = event_dyskinesia,
+             c(time_Event_midpoint, age_onset_imput,
+               timeEvent_UPDRSIIItotal_imputed,
+               timeEvent_LdopaDose,
+               disease_duration_onset_imput,
+               age_V1, V1_UPDRS_III_total))
+
+
+opdc_summary = opdc %>% 
+  inner_join(opdc_all %>% filter(visit == 1) %>% select(subjid, age)) %>%
+  mutate(SEX = as.numeric(as.character(SEX))) %>%
+  dplyr::rename(ID = IID) %>%
+  my_summary(cohort_name = "OPDC",
+             event = event_dyskinesia,
+             c(time_Event, age, age_onset,
+               UPDRSIII_imputed_BL,
+               disease_duration_onset_BL,
+               LEDD_BL))
+
+ppmi_summary = ppmi %>% 
+  mutate(SEX = as.numeric(as.character(SEX))) %>%
+  dplyr::rename(ID = PATNO) %>%
+  my_summary(cohort_name = "PPMI",
+             event = event_dysk,
+             c(time_Event, ageonset,
+               age,
+               updrs3_score_on,
+               durOnset,
+               LEDD))
+
+pdbp_summary = pdbp %>% 
+  dplyr::filter(LONG_DISDUR == 0) %>%
+  my_summary(cohort_name = "PDBP",
+             event = EVENT_DYSK,
+             c(age_at_baseline,age_at_diagnosis,
+               MDSUPDRSIII_BL, TIMEMIDPOINT_YEARS,
+               DIS_DUR, LEDD, DailyLevo))
+
+pdstat_summary = pdstat %>% 
+  mutate(SEX = as.numeric(as.character(SEX))) %>%
+  dplyr::filter(longdisdur == 0) %>%
+  dplyr::rename(ID = IID) %>%
+  my_summary(cohort_name = "PDSTAT",
+             event = event_dyskinesia,
+             c(time_Event, AAO, AAB,
+               disDur,MDSUPDRSIII))
+
+```
+
+
+
+
