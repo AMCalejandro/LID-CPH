@@ -1,14 +1,14 @@
-het_callrate.R
+qc_scripts/het_callrate.R
 --------------
 Find heterozygosity and sample rate missingness outliers
 
 
-pcs_plot.R
+qc_scripts/pcs_plot.R
 ----------
 Code to plot the PCs to come up with an effective SD threshold to consier outliers
 
 
-ancestry_outliers.R
+qc_scripts/ancestry_outliers.R
 -------------------
 Code to find ancestry outliers
 
