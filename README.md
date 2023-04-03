@@ -1,4 +1,4 @@
-LiD genetic deteminants study.  
+<br/> LiD genetic deteminants study. <br/><br/>
 
 In this remote, you will find:
 - Workflows we used on the analysis under ./workflows/
