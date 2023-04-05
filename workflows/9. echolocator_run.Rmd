@@ -1,0 +1,227 @@
+---
+title: 'get echolocatoR results'
+author: 
+- name: "Alejandro M.Carrasco"
+  affiliation: UCL
+output: 
+  html_document:
+    code_folding: hide
+    theme: paper
+    highlight: kate
+    df_print: paged
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+
+# Load libraries
+
+```{r}
+# Load libraries
+library(data.table) # Efficient multiprocessor data reading/writing/processing
+library(echolocatoR) # To fo the finemapping
+library(tidyverse) # For data wrangling / munging
+library(tools) # To perform format changes in the SS file
+library(rlang) # Data masking and more
+library(vautils) # Use util to find nearest gene from an input SNP
+library(here) # Efficient path management within the R project
+# Read file with metadata to perform finemapping
+library(colochelpR, lib.loc = "/mnt/rreal/RDS/acarrasco/R_libs")
+library(SNPlocs.Hsapiens.dbSNP144.GRCh37, lib.loc = "/mnt/rreal/RDS/acarrasco/R_libs")
+```
+
+
+# Get echoRwrapper_functions via git
+
+I will use this wrapper I created to do the finemapping
+```{bash}
+git clone https://github.com/AMCalejandro/echor_wrapperPipes
+```
+
+
+
+```{r}
+
+
+# Activate echoR conda env
+system("conda activate echoR")
+
+metadata = readLines("./metadata_LID.txt")
+# Making sure I remove any problematic white spaces
+metadata = metadata[which(metadata!="")]
+metadata = trimws(gsub("\\s+", "", metadata))
+
+# Storing metadata information
+# This script should take the data harmonised. Perform harmonization outside this script
+fullSS_path = metadata[1]
+fullRS_path = metadata[2]
+newSS_name = metadata[3]
+
+# Load echoR wrapper pipes
+source("echor_wrapperPipes/R/utils.R")
+
+# Create RS if not exist
+make_results_dir(fullRS_path)
+# Read GWAS and do some wrangling
+data = fread(fullSS_path)
+
+if ("MarkerName" %in% colnames(data)) {
+  data = data %>% dplyr::rename(SNP = MarkerName, Pval = `P-value`) %>%
+    select(SNP, everything())
+
+  dbSNP = SNPlocs.Hsapiens.dbSNP144.GRCh37
+  data =  colochelpR::convert_rs_to_loc(df = data, SNP_column = "SNP", dbSNP = dbSNP) %>%
+    separate(loc, into = c("CHR", "POS")) %>%
+    mutate(CHR = as.numeric(as.character(CHR)),
+           POS = as.numeric(POS))
+  metadata = SS_check(data, metadata)
+} else {
+  metadata = SS_check(data, metadata)
+}
+
+
+metadata = c(metadata[2], metadata[4])
+data_qc = fread(metadata[2])
+lead_variants = gwas_lead_snps(data_qc, pval_thres = 5e-8, pval_col = "Pval",
+                                chr_col = "CHR", pos_col = "POS")
+top_SNPs = make_topSNPs(lead_variants, build = "hg19",
+                        write.out = T,
+                        .metadata_file = metadata,
+                        custom_gene = c("PCDH7"))
+
+source("/mnt/rreal/RDS/acarrasco/TOOLS/echor_wrapperPipes/R/finemap_plotting.R")
+# Get finemapping results
+finemapping_wrapper(top_SNPs = top_SNPs,
+                    study_name = "PD_GWAS",
+                    study_type = "motor_progression",
+                    build = "hg19",
+                    finemap_tools = c("ABF", "FINEMAP", "SUSIE", "POLYFUN_SUSIE"),
+                    ld_ref = c("UKB"),
+                    mean_SS = 3500)
+```
+
+
+# Run Nott
+
+Now, we are going to make use of the cache of the working directory in which we ran echolocatoR.
+Then, we will map each GWAS nominated locus against Nott brain cell type specific epigenomic marks
+
+```{r}
+fullSS_path <- "/mnt/rreal/RDS/acarrasco/ANALYSES_WORKSPACE/DATA_EXPLORATION/tmp/LID_echolocatoR/QC_COLOC.txt"
+fullRS_path <- "/mnt/rreal/RDS/acarrasco/ANALYSES_WORKSPACE/DATA_EXPLORATION/tmp/LID_echolocatoR/RESULTS"
+top_SNPs = fread("../topSNPs_lid.txt")
+
+lid_pd = finemap_loci(top_SNPs = top_SNPs,
+                      loci = top_SNPs$Locus,
+                      dataset_name = "",
+                      dataset_type = "GWAS",
+                      force_new_subset = F,
+                      force_new_LD = F,
+                      force_new_finemap = F,
+                      remove_tmps = F,
+
+                     # SUMMARY STATS ARGUMENTS
+                     fullSS_path = fullSS_path,
+                     results_dir = fullRS_path,
+                     query_by = "tabix",
+                     chrom_col = "CHR", position_col = "POS", snp_col = "MarkerName",
+                     pval_col = "Pval", effect_col = "Effect", stderr_col = "StdErr",
+                     freq_col = "medianFreq", MAF_col = "calculate",
+                     A1_col = "Allele1",
+                     A2_col = "Allele2",
+                     #N_cases_col = "TotalSampleSize",
+                     #N_controls = 0,
+
+                     bp_distance = 500000*2,
+                     min_MAF = 0.001,
+                     trim_gene_limits = F,
+
+                     # FINE-MAPPING ARGUMENTS
+                     ## General
+                     finemap_methods = c("ABF","FINEMAP","SUSIE","POLYFUN_SUSIE"),
+                     n_causal = 5,
+                     PP_threshold = .95,
+
+                     # LD ARGUMENTS
+                     LD_reference = "UKB",
+                     superpopulation = "EUR",
+                     download_method = "axel",
+
+                     case_control = F,
+                     nThread = 15,
+                     sample_size = 3572,
+
+                     plot.types=c("fancy"),
+                     plot.zoom = c("all","4x","10x"),
+                     plot.Roadmap = F,
+                     plot.Roadmap_query = NULL,
+                     plot.Nott_epigenome = T,
+                     plot.Nott_show_placseq = T,
+                     verbose = F,
+                     conda_env="echoR"
+                     )
+
+```
+
+
+
+# Get ENCODE_TFBS marks
+
+```{r}
+
+fullSS_path <- "/mnt/rreal/RDS/acarrasco/ANALYSES_WORKSPACE/DATA_EXPLORATION/tmp/LID_echolocatoR/QC_COLOC.txt"
+fullRS_path <- "/mnt/rreal/RDS/acarrasco/ANALYSES_WORKSPACE/DATA_EXPLORATION/tmp/LID_echolocatoR/RESULTS"
+top_SNPs = fread("../topSNPs_lid.txt")
+
+
+lid_pd = finemap_loci(top_SNPs = top_SNPs,
+                      loci = top_SNPs$Locus,
+                      dataset_name = "",
+                      dataset_type = "GWAS",
+                      force_new_subset = F,
+                      force_new_LD = F,
+                      force_new_finemap = F,
+                      remove_tmps = F,
+
+                      # SUMMARY STATS ARGUMENTS
+                      fullSS_path = fullSS_path,
+                      results_dir = fullRS_path,
+                      query_by = "tabix",
+                      chrom_col = "CHR", position_col = "POS", snp_col = "MarkerName",
+                      pval_col = "Pval", effect_col = "Effect", stderr_col = "StdErr",
+                      freq_col = "medianFreq", MAF_col = "calculate",
+                      A1_col = "Allele1",
+                      A2_col = "Allele2",
+                      #N_cases_col = "TotalSampleSize",
+                      #N_controls = 0,
+
+                      bp_distance = 500000*2,
+                      min_MAF = 0.001,
+                      trim_gene_limits = F,
+
+                     # FINE-MAPPING ARGUMENTS
+                     ## General
+                      finemap_methods = c("ABF","FINEMAP","SUSIE","POLYFUN_SUSIE"),
+                      n_causal = 5,
+                      PP_threshold = .95,
+
+                     # LD ARGUMENTS
+                      LD_reference = "UKB",
+                      superpopulation = "EUR",
+                      download_method = "axel",
+ 
+                      case_control = F,
+                      nThread = 15,
+                      sample_size = 3572,
+
+                      plot.types=c("fancy"),
+                      plot.zoom = c("all","4x","10x"),
+                      plot.XGR_libnames=c("ENCODE_TFBS_ClusteredV3_CellTypes", "Uniform_TFBS"),
+                      verbose = F,
+                      conda_env="echoR"
+                      )
+``` 
+
+
+

@@ -1,0 +1,131 @@
+---
+title: 'Candidate variants analysis'
+author: 
+- name: "Alejandro M.Carrasco"
+  affiliation: UCL
+output: 
+  html_document:
+    code_folding: hide
+    theme: paper
+    highlight: kate
+    df_print: paged
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+
+# Description
+
+We want to perform a candidate variants analysis based on data from LID portal
+
+
+# Load libs
+```{r}
+
+# LOAD LIBRARIES
+.libPaths("/mnt/rreal/RDS/acarrasco/R_libs/")
+library(data.table)
+library(tidyverse)
+library(SNPlocs.Hsapiens.dbSNP144.GRCh37)
+library(colochelpR)
+library(LDlinkR)
+
+```
+
+
+# Load data
+
+```{r}
+lidVariants <- read.delim("~/POST_GWAS/V2/CANDIDATE_VARIANT_ANALYSIS/Panel_LID.tsv")
+lidmetanalysis = fread("~/METAANALYSIS/METAL_AUG2022/metal_tpd.opdc.ppmi.pdstat.pdbp_BESTMODEL_MOTORBL_stderr_1.tbl")
+```
+
+
+# QUERY LIDPD DATABASE 
+```{r}
+
+# QUERY LIDPD DATABASE 
+
+# SNP id transfromation
+dbSNP = SNPlocs.Hsapiens.dbSNP144.GRCh37
+lidVariants_snpUpdate = lidVariants %>% 
+  filter(!dbSNP.ID == "-") %>%
+  colochelpR::convert_rs_to_loc(., SNP = "dbSNP.ID", dbSNP=dbSNP) %>%
+  dplyr::rename(chrpos = loc)
+
+lidVariants_lidmetanalysis = lidVariants_snpUpdate %>% 
+  inner_join(lidmetanalysis %>% 
+               select(MarkerName,Freq1,BETA=Effect,
+                      SE=StdErr,Pgwas=`P-value`,
+                      Direction, Nsamples = TotalSampleSize), by=c("chrpos"="MarkerName")) %>%
+  dplyr::arrange(Pgwas) %>%
+  dplyr::relocate(c(1:2,4:6), .after=Nsamples)
+
+lidVariants_lidmetanalysis_basic = lidVariants_snpUpdate %>% 
+  inner_join(lidMetanalysis_basic %>% 
+               select(MarkerName,Freq1,BETA=Effect,
+                      SE=StdErr,Pgwas=`P-value`,
+                      Direction, Nsamples = TotalSampleSize), by=c("chrpos"="MarkerName")) %>%
+  dplyr::arrange(Pgwas) %>%
+  
+  dplyr::mutate(MAF = ifelse(Freq1 < 0.5, Freq1, 1-Freq1),
+                BETA = ifelse(Freq1 < 0.5, BETA, -1*BETA)) %>%
+  
+  dplyr::select(-c(chrpos, Freq1)) %>%
+  dplyr::rename(rsID = dbSNP.ID ) %>%
+  dplyr::relocate(c(1:2,4:6), .after = Nsamples) %>% 
+  dplyr::relocate(MAF,  .after = rsID) 
+  
+fwrite(lidVariants_lidmetanalysis_basic, "LIDPD_LIDGWAS_query.csv", quote= F, sep="," ,col.names=T, row.names=F)
+```
+
+
+# SEARCH FOR G20192 AND MAOA MAOB LID RELATED POLYMORPHISMS PROXIES
+
+```{r}
+
+
+# check genes for which the risk variants was not present in our meta-analysis
+genes_missing = setdiff(unique(lidVariants_snpUpdate$HGNC.symbol), unique(lidVariants_lidmetanalysis_basic$HGNC.symbol))
+
+# Get variants in high LD, and check in our meta-analysios
+# We do not have info for chromosome X. Exclude COMT
+variants =  lidVariants_snpUpdate  %>% 
+  filter( (HGNC.symbol %in% genes_missing) & (!dbSNP.ID == "-")
+          & (!grepl("X:", chrpos))) %>%
+  mutate(chrpos = paste0("chr", chrpos)) %>%
+  pull(chrpos)
+
+mytoken = "32e6b695b2aa"
+proxies.lrrk2 = lapply(variants, FUN = function(x)
+  LDproxy(x, pop = "CEU",
+          r2d="r2",
+          token = mytoken)
+)
+
+```
+
+
+# Look at for PINK1, PARKN, GBA variants
+```{r}
+lidmetanalysis = lidmetanalysis %>%
+  tidyr::separate(Markername, sep = ":", into = c("CHR", "POS"))
+
+gba1_data = lidmetanalysis %>%
+  dplyr::filter( (CHR == 1) &(POS > 155204243) & (POS < 155214418))
+fwrite(gba_data, "~/res/gba1_metanalysis_vars.txt")
+
+dj1_data = lidmetanalysis %>%
+  dplyr::filter( (CHR == 1) &(POS > 8021771) & (POS < 8045565))
+fwrite(dj1_data, "~/res/dj1_metanalysis_vars.txt")
+
+pink1_data = lidmetanalysis %>%
+  dplyr::filter( (CHR == 1) &(POS > 20959951) & (POS < 20978004))
+fwrite(pink1_data, "~/res/pink1_metanalysis_vars.txt")
+
+prkn_data = lidmetanalysis %>%
+  dplyr::filter( (CHR == 6) &(POS > 161768449) & (POS < 163148798))
+fwrite(prkn_data, "~/res/prkn_metanalysis_vars.txt")
+```
+

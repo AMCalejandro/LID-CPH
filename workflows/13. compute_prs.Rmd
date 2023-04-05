@@ -1,0 +1,238 @@
+---
+title: "get_PRS"
+output: html_document
+date: "2022-12-13"
+---
+
+
+
+
+> In this Markdown, we want to get the necessary files to compute LID GHS
+
+
+# Set up
+
+```{r}
+library(tidyverse)
+library(data.table)
+library(survminer)
+library(survival)
+library(timeROC)
+
+tpd = fread("tpd/PROBAND_ALL.txt")
+tpd_genotype_bim = fread("tpd/HARDCALLS.FINALSUBSET.bim")
+tpd_prs_all=  fread("tpd/tpd_prsscripts/prsice_nominalsignificant.all_score")
+
+opdc = fread("opdc/OPDC_ALL.txt")
+opdc_genotype_bim = fread("opdc/HARDCALLS_V2.SAMPLESQC.bim")
+opdc_prs_all = fread("opdc/prs_scripts/prsice_nominalsignificant.all_score")
+```
+
+
+
+# PRS in TPD
+
+## Get the necessary files to compute PRS
+
+Get pheno / covariate files
+
+
+```{r}
+# Do some minor QC
+tpd_qc = tpd %>%
+  dplyr::filter(left_censored == 0) %>%
+  dplyr::mutate(FID = 0) %>%
+  dplyr::relocate(FID, .before = IID)
+
+# Get covariate file (with FID, IID)
+tpd_covars = tpd_qc %>%
+  dplyr::select(FID, IID, SEX, AAO.std,
+                PC1, PC2, PC3, PC4, PC5)
+
+# Get PHENO file (with FID, IID)
+tpd_pheno = tpd_qc %>%
+  dplyr::select(FID, IID, event_dyskinesia)
+
+# Get the left censored patients we want to exclude
+left_censored = tpd %>%
+  dplyr::filter(left_censored == 1) %>%
+  dplyr::mutate(FID = 0) %>%
+  dplyr::relocate(FID, .before = IID) %>%
+  select(FID, IID)
+
+# Write the files
+fwrite(tpd_covars, "tpd/covars_lid.txt", col.names = T, row.names = F, sep = "\t", quote = F)
+fwrite(tpd_pheno, "tpd/pheno_lid.txt", col.names = T, row.names = F, sep = "\t", quote = F)
+fwrite(left_censored, "tpd/leftcensored_exclude.txt", col.names = T, row.names = F, sep = "\t", quote = F)
+
+```
+
+Do some data wrangling int TPD genotype data
+
+```{r}
+updatesnpnames = tpd_genotype_bim %>%
+  mutate(NEW_NAME = paste(V1, V4, sep = ":")) %>%
+  select(OLD_NAME = V2, NEW_NAME)
+fwrite(updatesnpnames, "tpd/snpnames_update.txt", col.names = T, row.names = F,
+       sep = "\t", quote = F)
+```
+
+
+## Compute PRS for TPD data and estimate AUC
+
+PRS is computed using PRSice in linux 
+
+```{bash}
+/mnt/rreal/RDS/acarrasco/TOOLS/PRSICE/PRSice_linux \
+--base ../LID_GWAS.txt \
+--a1 Allele1 --a2 Allele2 --beta --pvalue P-value \
+--clump-kb 250kb --clump-p 1.000000 --clump-r2 0.100000 \
+--cov ../covars_lid.txt --cov-factor SEX --pheno ../pheno_lid.txt \
+--bar-levels 5e-8,5e-6 --fastscore --no-full \
+--lower 5e-08 --upper 5e-6 \
+--seed 3794676113 \
+--all-score \
+--print-snp \
+--target ../HARDCALLS.FINALSUBSET.NAMESUPDATED.NOLEFTCENS  \
+--thread 10 --out prsice_nominalsignificant
+```
+
+
+Then, we load it here and explore AUC
+```{r}
+# Load PRS and merge with TPD data
+tpd_prs_all=  tpd_prs_all %>%
+  dplyr::rename(prs_sginificant = `Pt_5e-08`, prs_nominal = `Pt_5e-06`)
+tpd_qc = tpd_qc %>%
+  inner_join(tpd_prs_all %>% dplyr::select(c(IID, starts_with("prs"))))
+
+tpd_roc_cox = timeROC(T = tpd_qc$time,
+                   delta = tpd_qc$event_dyskinesia,
+                   marker= tpd_qc$prs_nominal,
+                   cause = 1,
+                   weighting="marginal",
+                   times=c(5,10,15),
+                   ROC = TRUE,
+                   iid = TRUE)
+tiff("~/DATA_EXPLORATION/GHS_tmp/tpd/AUC_GRAPHS/TPD_AUC.GRS.tiff", units="in", width=5, height=5, res=400)
+plot(tpd_roc_cox, time = 10)
+dev.off()
+
+jpeg("~/DATA_EXPLORATION/GHS_tmp/tpd/AUC_GRAPHS/TPD_AUC.GRS.jpg", units="in", width=5, height=5, res=400)
+plot(tpd_roc_cox, time = 10)
+dev.off()
+
+# Next step is to test the SNPs that give this PRS in OPDC
+```
+
+
+
+# Test TPD PRS in OPDC
+
+We get the set of SNP selected to derive the PRS in TPD, and test it in OPDC
+
+## Get the necessary files to compute GHS
+
+Get pheno / covariate files
+
+```{r}
+# Do some minor QC
+opdc = opdc %>%
+  dplyr::mutate(FID = 0) %>%
+  dplyr::relocate(FID, .before = IID)
+
+# Get covariate file (with FID, IID)
+opdc_covars = opdc %>%
+  dplyr::select(FID , IID = IID,
+                SEX, age_onset.std, PC1, PC2, PC3, PC4, PC5)
+
+# Get PHENO file (with FID, IID)
+opdc_pheno = opdc %>%
+  dplyr::select(FID, IID, event_dyskinesia)
+
+
+# Write the files
+fwrite(opdc_covars, "opdc/covars_lid.txt", col.names = T, row.names = F, sep = "\t", quote = F)
+fwrite(opdc_pheno, "opdc/pheno_lid.txt", col.names = T, row.names = F, sep = "\t", quote = F)
+#fwrite(left_censored, "leftcensored_exclude.txt", col.names = T, row.names = F, sep = "\t", quote = F)
+
+```
+
+Do some data wrangling int OPDC genotype data
+
+```{r}
+updatesnpnames = opdc_genotype_bim %>%
+  mutate(NEW_NAME = paste(V1, V4, sep = ":")) %>%
+  select(OLD_NAME = V2, NEW_NAME)
+fwrite(updatesnpnames, "opdc/snpnames_update.txt", col.names = T, row.names = F,
+       sep = "\t", quote = F)
+```
+
+
+## Compute PRS for OPDC data and estimate AUC
+
+PRS is computed using PRSice in linux
+
+```{r}
+/mnt/rreal/RDS/acarrasco/TOOLS/PRSICE/PRSice_linux \
+--base ../../LID_GWAS.txt \
+--a1 Allele1 --a2 Allele2 --beta --pvalue P-value \
+--clump-kb 250kb --clump-p 1.000000 --clump-r2 0.100000 \
+--cov ../covars_lid.txt --cov-factor SEX --pheno ../pheno_lid.txt \
+--bar-levels 5e-8,5e-6 --fastscore --no-full \
+--lower 5e-08 --upper 5e-6 \
+--seed 3794676113 \
+--all-score \
+--extract ../snps_prs.txt \
+--print-snp \
+--target ../HARDCALLS_V2.SAMPLESQC.SNPSUPDATED  \
+--thread 10 --out prsice_nominalsignificant
+```
+
+
+
+Then, we load it here and explore AUC
+
+```{r}
+# Load PRS and merge with TPD data
+opdc_prs_all= opdc_prs_all %>%
+  dplyr::rename(prs_sginificant = `Pt_5e-08`, prs_nominal = `Pt_5e-06`)
+
+opdc = opdc %>%
+  inner_join(opdc_prs_all %>% dplyr::select(-FID))
+
+opdc_roc_cox = timeROC(T = opdc$time_Event,
+                   delta = opdc$event_dyskinesia,
+                   marker= opdc$prs_nominal,
+                   cause = 1,
+                   weighting="marginal",
+                   times=c(5,10,15),
+                   ROC = TRUE,
+                   iid = TRUE)
+plot(opdc_roc_cox, time = 10)
+
+
+tiff("~/DATA_EXPLORATION/GHS_tmp/opdc/AUC_GRAPHS/OPDC_AUC.GRS.tiff", units="in", width=5, height=5, res=400)
+plot(opdc_roc_cox, time = 10)
+dev.off()
+
+jpeg("~/DATA_EXPLORATION/GHS_tmp/opdc/AUC_GRAPHS/OPDC_AUC.GRS.jpg", units="in", width=5, height=5, res=400)
+plot(opdc_roc_cox, time = 10)
+dev.off()
+# Next step is to test the SNPs that give this PRS in OPDC
+```
+
+
+# Save list of GRS snps and its meta-analysis metrics on a csv file.
+
+```{r}
+get_snps = fread("tpd/tpd_prsscripts/prsice_nominalsignificant.snp")
+get_gwas = fread("LID_GWAS.txt")
+gwas_filt = get_gwas %>%
+  filter(SNP %in% get_snps$SNP) %>%
+  dplyr::select(SNP, CHR, BP, MAF, BETA, SE, `P-value`)
+
+fwrite(gwas_filt, "GRS_SNPS.csv", col.names = T, row.names = F, sep = ",", quote = F)
+```
+
+
