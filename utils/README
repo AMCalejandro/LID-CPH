@@ -3,3 +3,6 @@ This is function borrowed from "colochelpR" github package to find near genes gi
 
 utils.R
 Several functions I developed during the LiD CPH study length to make my life easier and make the Rmd more legible
+
+cph_run_functions.R
+Functions we developed to run CPH models splitting genetic data into chunks to ease reading data in memory, then speed up the process setting up parallel backend to run across chromoso
