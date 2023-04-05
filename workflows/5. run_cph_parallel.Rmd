@@ -1,0 +1,95 @@
+---
+title: "Run CPH models"
+author: "AMCalejandro"
+date: "1/09/2022"
+output: html_document
+---
+
+
+# Load libraries and source util to split genetic data into chunks
+```{r}
+.libPaths("/data/kronos/kronos/acarrasco/R_libs")
+library(dplyr)
+library(data.table)
+library(tidyverse)
+library(doParallel)
+library(survival)
+library(foreach)
+
+source(here::here("utils/cph_run_functions.R"))
+```
+
+
+# Load data
+
+Load clinical data we need to fit the model
+Load PCs we need to correct for pop stratification
+This process is dope independently for each cohort we had access to
+
+```{r}
+PCs <- read.table("PCA.eigenvec", sep = "", header= FALSE)
+clinical <- readRDS("~DATA/MYQC_COHORT.RDS")
+```
+
+
+# Run chunk file creater
+
+```{r}
+# Calling the function to split the big genetic file and read it
+ChunkFileCreator(Ngwas, Nchunk)
+```
+
+
+# Do minimal data QC and join the data
+
+```{r}
+#Select just the first 5 principal components
+PCs <- PCs %>%
+  select(V2:V7) %>%
+  rename(IID = V2,
+         PC1 = V3,
+         PC2 = V4,
+         PC3 = V5,
+         PC4 = V6,
+         PC5 = V7)
+
+clinical <- clinical %>%
+    filter(left_censored != 1 ) %>%
+    mutate(ldopaDose.std = scale(timeEvent_LdopaDose),
+           motorBL.std = scale(timeEvent_UPDRSIIItotal_imputed))
+```
+
+
+# Setup parallel backend to use many processors
+
+```{r}
+cores=detectCores()
+cl <- makeCluster(25) # 25 to not overload the cluster
+clusterEvalQ(cl, .libPaths("/data/kronos/kronos/acarrasco/R_libs"))
+registerDoParallel(cl)
+```
+
+
+# Run the parallel job
+```{r}
+chunks <- as.vector(list.files("GeneticChunksFiles/", pattern="txt", full.names = TRUE, recursive = TRUE))
+total_chunks = as.integer(length(chunks))
+finalMatrix <- foreach(i=1:total_chunks, .combine=rbind) %dopar% {
+         chunkMatrix = GWAS_survival(clinical = clinical, PCs = PCs, i = i) #calling a function
+         chunkMatrix #Equivalent to finalMatrix = cbind(finalMatrix, chunkMatrix)
+  }
+```
+
+
+# Syop the cluster
+```{r}
+stopCluster(cl)
+```
+
+
+# Save results
+
+```{r}
+fwrite(finalMatrix, file = "COHORT_CPHGWAS_RES.txt", col.names = TRUE, sep = "\t", quote = F)
+```
+
