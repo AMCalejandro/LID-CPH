@@ -20,7 +20,6 @@ In this remote, you will find:
 - Candidate variants analysis was performed on HPC cluster following: [12. candidate_genevariants.Rmd](https://github.com/AMCalejandro/LID-CPH/blob/main/workflows/12.%20candidate_genevariants.Rmd)  
 - PRS and ROC curves were generated on HPC cluster following: [13. compute_prs.Rmd](https://github.com/AMCalejandro/LID-CPH/blob/main/workflows/13.%20compute_prs.Rmd)  - Baseline features selection on based on a stepwise regression algorithm implemented on top of logistic model regression were generated on HPC cluster following: [14. stepwiseSelection.Rmd](https://github.com/AMCalejandro/LID-CPH/blob/main/workflows/14.%20stepwiseSelection.Rmd)  
 - Colocalization analyses against eQTL datasets were performed on HPC cluster following: [15.1. lidvsnonlid_motorcognitive.Rmdd](https://github.com/AMCalejandro/LID-CPH/blob/main/workflows/15.1.%20lidvsnonlid_motorcognitive.Rmd)  & [15.2. anxiety_tpd_ppmi.Rmd](https://github.com/AMCalejandro/LID-CPH/blob/main/workflows/15.2.%20anxiety_tpd_ppmi.Rmd)
-
 <br/><br/>
 
 2.Functions we created to perform the analysis under **./utils/**  
