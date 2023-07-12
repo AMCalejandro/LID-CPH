@@ -1,2 +1,9 @@
 This is the script we used to perform the meta-analysis described in Methods.
 We used METAL software -> https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2922887/
+
+metal_qc.R
+----------
+
+Script to perform QC of the meta-analysis .tbl file
+
+To run: Rscript metal_qc.R <path/to/meta.tbl>
