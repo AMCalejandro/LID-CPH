@@ -474,3 +474,46 @@ impute_UPDRSIII <- function(df, ID = "ID", score_column = "score", visit_column 
   
   return(final_df)
 }
+
+
+qc_metal = function(df, N) {
+  
+  rndn_snp = df[1,]$MarkerName
+  snpFormat = checkFormat(rndn_snp)
+  
+  if (!snpFormat == "rs") {
+    snp_splitted = as.data.frame(stringr::str_split_fixed(df$MarkerName, pattern = ":",  n = 2))
+    names(snp_splitted) = c("CHR", "BP")
+    df = cbind(df, snp_splitted)
+    df = df %>% 
+      dplyr::relocate(c(CHR,BP), .after=MarkerName) %>%
+      dplyr::mutate(BP = as.integer(BP))
+  }
+  
+  
+  data_filtered <- df %>% 
+    filter((HetDf >= N -2) & (TotalSampleSize > 1000)) 
+  
+  data_filtered_sorted <- data_filtered %>%
+    arrange(`P-value`)
+  
+  #Filter out SNPs with HetPVal < 0.05 (Cochran's Q-test for heterogeneity)
+  #Also filter out SNPs with HetISq > 80
+  data_filtered_sorted_het <-data_filtered_sorted %>%
+    filter(HetPVal > 0.05) %>%
+    filter(HetISq < 80)
+  
+  #Check MAF variability - remove variants with MAF variability > 15%
+  data_filtered_sorted_het_MAF <- data_filtered_sorted_het %>%
+    mutate(MAF_variability = MaxFreq - MinFreq) %>%
+    filter(MAF_variability <= 0.15)
+  
+  fwrite(data_filtered_sorted_het_MAF, paste0(paste("QC_metaout", sep = "_"), ".tbl"), quote = F, row.names = F, col.names = T, sep = "\t")
+  
+  #Export for FUMA
+  export_FUMA <- data_filtered_sorted_het_MAF %>%
+    select(MarkerName, CHR, BP, Allele1, Allele2, pval = `P-value`, Effect, StdErr, TotalSampleSize)
+  
+  fwrite(export_FUMA, "metaanalysis_FUMA.txt", quote = F, row.names = F, col.names = T, sep = "\t")
+  data_filtered_sorted_het_MAF
+}
