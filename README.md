@@ -37,4 +37,4 @@ A README is added exaplaining what each bash script does.
 Here we keep the metal software script we used to run meta-analysis on cohort specific GWAS CPH regression model results.
 <br/><br/>
 
-Cite the code: [![DOI](https://zenodo.org/badge/622890537.svg)](https://zenodo.org/badge/latestdoi/622890537)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.8139563.svg)](https://doi.org/10.5281/zenodo.8139563)
