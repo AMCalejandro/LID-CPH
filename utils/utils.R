@@ -508,12 +508,12 @@ qc_metal = function(df, N) {
     mutate(MAF_variability = MaxFreq - MinFreq) %>%
     filter(MAF_variability <= 0.15)
   
-  fwrite(data_filtered_sorted_het_MAF, paste0(paste("QC_metaout", sep = "_"), ".tbl"), quote = F, row.names = F, col.names = T, sep = "\t")
+  fwrite(data_filtered_sorted_het_MAF, paste0("QC_metaout", ".tbl"), quote = F, row.names = F, col.names = T, sep = "\t")
   
   #Export for FUMA
   export_FUMA <- data_filtered_sorted_het_MAF %>%
     select(MarkerName, CHR, BP, Allele1, Allele2, pval = `P-value`, Effect, StdErr, TotalSampleSize)
   
-  fwrite(export_FUMA, "metaanalysis_FUMA.txt", quote = F, row.names = F, col.names = T, sep = "\t")
+  fwrite(export_FUMA, "metaanalysis_FUMA.txt.gz", quote = F, row.names = F, col.names = T, sep = "\t")
   data_filtered_sorted_het_MAF
 }
